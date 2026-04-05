@@ -42,6 +42,7 @@ from .models import (
     CalendarOps,
     FleetOps,
     EcommerceOps,
+    TodoMatrixOps,
 )
 from .smart_actions import SmartActionHandler
 from .sync import OdooChangePoller, OdooWebhookServer
@@ -71,6 +72,7 @@ __all__ = [
     "CalendarOps",
     "FleetOps",
     "EcommerceOps",
+    "TodoMatrixOps",
     # Smart Actions
     "SmartActionHandler",
     # Sync

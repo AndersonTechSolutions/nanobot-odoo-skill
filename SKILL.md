@@ -1,14 +1,14 @@
 ---
 name: odoo
 description: Build or use the Odoo ERP connector for OpenClaw (Sales, CRM, Purchase, Inventory, Projects, HR, Fleet, Manufacturing integration via XML-RPC).
-repository: https://github.com/NullNaveen/openclaw-odoo-skill
+repository: https://github.com/AndersonTechSolutions/openclaw-odoo-skill
 ---
 
 # Odoo ERP Connector
 
 Full-featured Odoo 19 ERP integration for OpenClaw. Control your entire business via natural language chat commands.
 
-**📦 Full Source Code:** https://github.com/NullNaveen/openclaw-odoo-skill
+**📦 Full Source Code:** https://github.com/AndersonTechSolutions/openclaw-odoo-skill
 
 ## Quick Install
 
@@ -96,6 +96,15 @@ All operations use **smart actions** that handle fuzzy matching and auto-creatio
 - Search events by date range or attendee
 - Track calendar availability
 
+### To-Do Priority Matrix (Eisenhower)
+- Create to-do tasks with urgent/important flags
+- View Eisenhower matrix per employee (Do/Schedule/Delegate/Eliminate)
+- Get team workload dashboard with per-employee breakdowns
+- Manage task states (todo → in progress → done)
+- Manage subtask checklists per task
+- Search and filter tasks by quadrant, state, or employee
+- Track overdue tasks and estimated hours
+
 ### eCommerce
 - Publish products to website
 - View website orders and customer activity
@@ -172,6 +181,16 @@ All operations use **smart actions** that handle fuzzy matching and auto-creatio
 - "What events do I have on the 15th?"
 - "Schedule a 2-hour planning session with the team"
 
+### To-Do Priority Matrix
+- "Create a to-do for Ian: Review Q4 budget, urgent and important, due April 15"
+- "Show Ian's Eisenhower matrix"
+- "Show the team workload dashboard"
+- "List all overdue to-dos"
+- "Complete to-do #42"
+- "Show all Do First tasks for the team"
+- "Create a to-do for Sarah: Update docs, important but not urgent"
+- "Add checklist item 'Review code' to to-do #10"
+
 ### eCommerce
 - "Publish Widget X to the website"
 - "Show me website orders from this week"
@@ -201,6 +220,9 @@ This pattern applies across all smart actions:
 - `smart_create_task()` — project + task
 - `smart_create_employee()` — department
 - `smart_create_event()` — event only (no dependencies)
+- `smart_create_todo()` — employee (fuzzy name match)
+- `smart_get_matrix()` — employee (fuzzy name match)
+- `smart_get_team_workload()` — team-wide dashboard
 
 ### Benefits
 
@@ -233,6 +255,7 @@ This pattern applies across all smart actions:
 - `CalendarOps` — Events and meetings
 - `FleetOps` — Vehicles and odometer
 - `EcommerceOps` — Website orders and products
+- `TodoMatrixOps` — To-Do Priority Matrix (Eisenhower)
 
 **SmartActionHandler** — High-level natural-language interface
 - Wraps all Ops classes
@@ -375,6 +398,28 @@ result = smart.smart_create_employee(
     department_name="Engineering"
 )
 employee = result["employee"]
+
+# Smart to-do creation (resolves employee by name)
+result = smart.smart_create_todo(
+    task_name="Review Q4 budget",
+    employee_name="Ian",
+    is_urgent=True,
+    is_important=True,
+    deadline="2026-04-15",
+)
+todo = result["task"]
+print(result["summary"])
+# Output: "To-do 'Review Q4 budget' created for Ian → Do First (urgent + important)"
+
+# Get Eisenhower matrix for an employee
+result = smart.smart_get_matrix(employee_name="Ian")
+print(result["summary"])
+# Output: "Priority Matrix for Ian: 3 Do First, 5 Schedule, 2 Delegate, 1 Eliminate (11 total)"
+
+# Get team workload
+result = smart.smart_get_team_workload()
+print(result["summary"])
+# Output: "Team Workload: 5 members, 23 active tasks, 4 overdue, 45.5h estimated"
 ```
 
 ### Low-Level Ops API
@@ -624,6 +669,7 @@ OdooConnector/
 │   │   ├── calendar_ops.py
 │   │   ├── fleet.py
 │   │   ├── ecommerce.py
+│   │   ├── todo_matrix.py           # To-Do Priority Matrix (Eisenhower)
 │   ├── utils/
 │   │   ├── formatting.py      # Response formatting
 │   │   ├── validators.py      # Input validation

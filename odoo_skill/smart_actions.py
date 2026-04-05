@@ -27,6 +27,7 @@ from .models.purchase import PurchaseOrderOps
 from .models.project import ProjectOps
 from .models.hr import HROps
 from .models.calendar_ops import CalendarOps
+from .models.todo_matrix import TodoMatrixOps
 
 logger = logging.getLogger("odoo_skill")
 
@@ -60,6 +61,7 @@ class SmartActionHandler:
         self.projects = ProjectOps(client)
         self.hr = HROps(client)
         self.calendar = CalendarOps(client)
+        self.todo_matrix = TodoMatrixOps(client)
 
     # ── Find-or-Create primitives ────────────────────────────────────
 
@@ -667,5 +669,147 @@ class SmartActionHandler:
             "summary": (
                 f"Event '{name}' created at {start}"
                 + (f" with {len(attendees_info)} attendee(s)" if attendees_info else "")
+            ),
+        }
+
+    # ── To-Do Priority Matrix smart actions ───────────────────────────
+
+    def smart_create_todo(
+        self,
+        task_name: str,
+        employee_name: str,
+        is_urgent: bool = False,
+        is_important: bool = False,
+        description: Optional[str] = None,
+        deadline: Optional[str] = None,
+        estimated_time: Optional[float] = None,
+        **kwargs: Any,
+    ) -> dict:
+        """Create a to-do task in the priority matrix, resolving employee by name.
+
+        Args:
+            task_name: Task title.
+            employee_name: Employee name (fuzzy matched).
+            is_urgent: Whether the task is urgent.
+            is_important: Whether the task is important.
+            description: Task description.
+            deadline: Due date as ``YYYY-MM-DD``.
+            estimated_time: Estimated hours.
+            **kwargs: Additional ``employee.todo.task`` field values.
+
+        Returns:
+            Dict with ``task``, ``employee`` info, ``quadrant``, and ``summary``.
+
+        Example::
+
+            result = smart.smart_create_todo(
+                task_name="Review Q4 budget",
+                employee_name="Ian",
+                is_urgent=True,
+                is_important=True,
+                deadline="2026-04-15",
+            )
+        """
+        # Resolve employee by name
+        employees = self.client.search_read(
+            "hr.employee",
+            [["name", "ilike", employee_name], ["active", "=", True]],
+            fields=["id", "name", "job_title", "department_id"],
+            limit=5,
+        )
+
+        if not employees:
+            raise ValueError(f"No employee found matching '{employee_name}'")
+
+        # Prefer exact match
+        exact = [e for e in employees if e["name"].lower() == employee_name.lower()]
+        employee = exact[0] if exact else employees[0]
+
+        task = self.todo_matrix.create_task(
+            name=task_name,
+            employee_id=employee["id"],
+            is_urgent=is_urgent,
+            is_important=is_important,
+            description=description,
+            deadline=deadline,
+            estimated_time=estimated_time,
+            **kwargs,
+        )
+
+        # Determine quadrant label
+        quadrant_labels = {
+            "do": "Do First (urgent + important)",
+            "schedule": "Schedule (important, not urgent)",
+            "delegate": "Delegate (urgent, not important)",
+            "eliminate": "Eliminate (neither)",
+        }
+        quadrant = task.get("eisenhower_quadrant", "eliminate")
+
+        return {
+            "task": task,
+            "employee": employee,
+            "quadrant": quadrant,
+            "summary": (
+                f"To-do '{task_name}' created for {employee['name']} "
+                f"→ {quadrant_labels.get(quadrant, quadrant)}"
+            ),
+        }
+
+    def smart_get_matrix(
+        self,
+        employee_name: str,
+    ) -> dict:
+        """Get an employee's Eisenhower priority matrix.
+
+        Args:
+            employee_name: Employee name (fuzzy matched).
+
+        Returns:
+            Dict with ``matrix`` (quadrant data), ``employee``, and ``summary``.
+        """
+        employees = self.client.search_read(
+            "hr.employee",
+            [["name", "ilike", employee_name], ["active", "=", True]],
+            fields=["id", "name"],
+            limit=5,
+        )
+
+        if not employees:
+            raise ValueError(f"No employee found matching '{employee_name}'")
+
+        exact = [e for e in employees if e["name"].lower() == employee_name.lower()]
+        employee = exact[0] if exact else employees[0]
+
+        matrix = self.todo_matrix.get_matrix(employee["id"])
+
+        return {
+            "matrix": matrix,
+            "employee": employee,
+            "summary": (
+                f"Priority Matrix for {employee['name']}: "
+                f"{matrix['summary']['do']} Do First, "
+                f"{matrix['summary']['schedule']} Schedule, "
+                f"{matrix['summary']['delegate']} Delegate, "
+                f"{matrix['summary']['eliminate']} Eliminate "
+                f"({matrix['summary']['total']} total)"
+            ),
+        }
+
+    def smart_get_team_workload(self) -> dict:
+        """Get team workload dashboard data.
+
+        Returns:
+            Dict with ``workload`` data and ``summary``.
+        """
+        workload = self.todo_matrix.get_team_workload()
+        totals = workload.get("team_totals", {})
+
+        return {
+            "workload": workload,
+            "summary": (
+                f"Team Workload: {totals.get('employee_count', 0)} members, "
+                f"{totals.get('total_active', 0)} active tasks, "
+                f"{totals.get('total_overdue', 0)} overdue, "
+                f"{totals.get('total_estimated_hours', 0):.1f}h estimated"
             ),
         }

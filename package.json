@@ -1,8 +1,8 @@
 {
   "name": "odoo-erp-connector",
   "version": "1.0.1",
-  "description": "Full-featured Odoo 19 ERP integration for OpenClaw (Sales, CRM, Purchase, Inventory, Projects, HR, Fleet, Manufacturing)",
-  "author": "NullNaveen",
+  "description": "Full-featured Odoo 19 ERP integration for OpenClaw (Sales, CRM, Purchase, Inventory, Projects, HR, Fleet, Manufacturing, To-Do Priority Matrix)",
+  "author": "AndersonTechSolutions",
   "license": "MIT",
   "keywords": [
     "odoo",
@@ -15,6 +15,8 @@
     "hr",
     "fleet",
     "manufacturing",
+    "todo-matrix",
+    "eisenhower",
     "xml-rpc"
   ],
   "engines": {
@@ -23,6 +25,6 @@
   "dependencies": {},
   "repository": {
     "type": "git",
-    "url": "https://github.com/nullnaveen/openclaw-odoo-skill"
+    "url": "https://github.com/AndersonTechSolutions/openclaw-odoo-skill"
   }
 }

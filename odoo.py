@@ -106,6 +106,22 @@ def execute_command(smart: SmartActionHandler, command: str) -> dict:
     elif "create employee" in cmd_lower:
         return handle_create_employee(smart, command)
     
+    # To-Do Priority Matrix
+    elif "create todo" in cmd_lower or "create to-do" in cmd_lower:
+        return handle_create_todo(smart, command)
+
+    elif "todo matrix" in cmd_lower or "eisenhower" in cmd_lower or "priority matrix" in cmd_lower:
+        return handle_get_matrix(smart, command)
+
+    elif "team workload" in cmd_lower or "workload dashboard" in cmd_lower:
+        return handle_team_workload(smart, command)
+
+    elif "complete todo" in cmd_lower or "done todo" in cmd_lower:
+        return handle_complete_todo(smart, command)
+
+    elif "list todo" in cmd_lower or "show todo" in cmd_lower or "my todo" in cmd_lower:
+        return handle_list_todos(smart, command)
+
     # Generic fallback
     else:
         return {
@@ -165,6 +181,60 @@ def handle_create_task(smart: SmartActionHandler, command: str) -> dict:
 def handle_create_employee(smart: SmartActionHandler, command: str) -> dict:
     """Create employee."""
     return {"action": "create_employee", "message": "Use smart.smart_create_employee()"}
+
+
+# ── To-Do Priority Matrix handlers ───────────────────────────────
+
+
+def handle_create_todo(smart: SmartActionHandler, command: str) -> dict:
+    """Create a to-do task in the priority matrix."""
+    return {
+        "action": "create_todo",
+        "message": "Use smart.smart_create_todo() with task_name and employee_name",
+        "example": {
+            "task_name": "Review Q4 budget",
+            "employee_name": "Ian",
+            "is_urgent": True,
+            "is_important": True,
+            "deadline": "2026-04-15",
+        },
+    }
+
+
+def handle_get_matrix(smart: SmartActionHandler, command: str) -> dict:
+    """Get an employee's Eisenhower priority matrix."""
+    return {
+        "action": "get_matrix",
+        "message": "Use smart.smart_get_matrix() with employee_name",
+        "example": {"employee_name": "Ian"},
+    }
+
+
+def handle_team_workload(smart: SmartActionHandler, command: str) -> dict:
+    """Get team workload dashboard data."""
+    return smart.smart_get_team_workload()
+
+
+def handle_complete_todo(smart: SmartActionHandler, command: str) -> dict:
+    """Complete a to-do task."""
+    return {
+        "action": "complete_todo",
+        "message": "Use smart.todo_matrix.complete_task() with task_id",
+        "example": {"task_id": 1},
+    }
+
+
+def handle_list_todos(smart: SmartActionHandler, command: str) -> dict:
+    """List to-do tasks for an employee."""
+    return {
+        "action": "list_todos",
+        "message": "Use smart.todo_matrix.search_tasks() with optional filters",
+        "example": {
+            "employee_id": 1,
+            "state": "todo",
+            "quadrant": "do",
+        },
+    }
 
 
 if __name__ == "__main__":

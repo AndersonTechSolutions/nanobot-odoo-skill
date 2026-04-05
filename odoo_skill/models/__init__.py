@@ -12,6 +12,7 @@ from .manufacturing import ManufacturingOps
 from .calendar_ops import CalendarOps
 from .fleet import FleetOps
 from .ecommerce import EcommerceOps
+from .todo_matrix import TodoMatrixOps
 
 __all__ = [
     "PartnerOps",
@@ -26,4 +27,5 @@ __all__ = [
     "CalendarOps",
     "FleetOps",
     "EcommerceOps",
+    "TodoMatrixOps",
 ]
