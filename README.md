@@ -39,8 +39,8 @@ npx clawhub install odoo-erp-connector
 
 ```bash
 # Clone the repository
-git clone https://github.com/nullnaveen/openclaw-odoo-skill.git
-cd openclaw-odoo-skill
+git clone https://github.com/AndersonTechSolutions/nanobot-odoo-skill.git
+cd nanobot-odoo-skill
 
 # Windows: Run installer
 .\setup.ps1
@@ -155,7 +155,7 @@ pytest tests/test_partners.py -v
 ## Project Structure
 
 ```
-openclaw-odoo-skill/
+nanobot-odoo-skill/
 ├── SKILL.md                  # OpenClaw skill definition
 ├── README.md                 # This file
 ├── package.json              # Skill metadata
@@ -241,7 +241,7 @@ MIT License - see LICENSE file for details
 
 ## Support
 
-- **Issues:** [GitHub Issues](https://github.com/nullnaveen/openclaw-odoo-skill/issues)
+- **Issues:** [GitHub Issues](https://github.com/AndersonTechSolutions/nanobot-odoo-skill/issues)
 - **ClawHub:** [odoo-erp-connector](https://clawhub.ai/skills/odoo-erp-connector)
 - **Discord:** [OpenClaw Community](https://discord.com/invite/clawd)
 

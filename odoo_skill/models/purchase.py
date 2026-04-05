@@ -237,13 +237,21 @@ class PurchaseOrderOps:
                 for move_id in pick.get("move_ids", []):
                     move = self.client.read(
                         "stock.move", move_id,
-                        fields=["id", "product_uom_qty", "quantity"],
+                        fields=["id", "product_uom_qty"],
                     )
                     if move:
-                        self.client.write(
-                            "stock.move", move_id,
-                            {"quantity": move[0]["product_uom_qty"]},
-                        )
+                        # Odoo 17: field is 'quantity_done'
+                        # Odoo 18+: renamed to 'quantity'
+                        try:
+                            self.client.write(
+                                "stock.move", move_id,
+                                {"quantity_done": move[0]["product_uom_qty"]},
+                            )
+                        except Exception:
+                            self.client.write(
+                                "stock.move", move_id,
+                                {"quantity": move[0]["product_uom_qty"]},
+                            )
 
                 # Validate the picking
                 try:

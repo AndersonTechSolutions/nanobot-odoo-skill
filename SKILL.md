@@ -1,14 +1,14 @@
 ---
 name: odoo
 description: Build or use the Odoo ERP connector for OpenClaw (Sales, CRM, Purchase, Inventory, Projects, HR, Fleet, Manufacturing integration via XML-RPC).
-repository: https://github.com/AndersonTechSolutions/openclaw-odoo-skill
+repository: https://github.com/AndersonTechSolutions/nanobot-odoo-skill
 ---
 
 # Odoo ERP Connector
 
-Full-featured Odoo 19 ERP integration for OpenClaw. Control your entire business via natural language chat commands.
+Full-featured Odoo 17+ ERP integration for OpenClaw. Control your entire business via natural language chat commands.
 
-**📦 Full Source Code:** https://github.com/AndersonTechSolutions/openclaw-odoo-skill
+**📦 Full Source Code:** https://github.com/AndersonTechSolutions/nanobot-odoo-skill
 
 ## Quick Install
 
@@ -742,7 +742,7 @@ This connector is part of the OpenClaw project. For issues, questions, or contri
 
 ---
 
-**Last Updated:** 2026-02-09  
-**Odoo Version:** 19.0  
+**Last Updated:** 2026-04-05
+**Odoo Version:** 17.0+
 **Python:** 3.10+  
 **Status:** Production Ready

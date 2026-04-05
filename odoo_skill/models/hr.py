@@ -377,8 +377,11 @@ class HROps:
     def submit_expense(self, expense_ids: list[int]) -> list[dict]:
         """Submit expenses for approval.
 
-        In Odoo 19+, expenses are submitted directly (no expense sheets).
-        Calls ``action_submit`` on the expense records.
+        Odoo 17 uses expense sheets (``hr.expense.sheet``): expenses are
+        grouped into a sheet, then the sheet is submitted. Odoo 19+
+        submits expenses directly via ``action_submit``.
+
+        This method handles both workflows transparently.
 
         Args:
             expense_ids: List of expense IDs to submit.
@@ -389,7 +392,27 @@ class HROps:
         if not expense_ids:
             raise ValueError("At least one expense ID is required")
 
-        self.client.execute(self.EXPENSE_MODEL, "action_submit", expense_ids)
+        # Try Odoo 19+ direct submit first
+        try:
+            self.client.execute(self.EXPENSE_MODEL, "action_submit", expense_ids)
+        except Exception:
+            # Odoo 17: create an expense sheet and submit via sheet
+            sheet_id = self.client.create("hr.expense.sheet", {
+                "name": "Expense Report",
+                "expense_line_ids": [(6, 0, expense_ids)],
+            })
+            self.client.execute(
+                "hr.expense.sheet", "action_submit_sheet", [sheet_id],
+            )
+            logger.info(
+                "Submitted %d expense(s) via sheet id=%d",
+                len(expense_ids), sheet_id,
+            )
+            return self.client.read(
+                self.EXPENSE_MODEL, expense_ids,
+                fields=_EXPENSE_DETAIL_FIELDS,
+            )
+
         logger.info("Submitted %d expense(s) for approval", len(expense_ids))
         return self.client.read(
             self.EXPENSE_MODEL, expense_ids,
