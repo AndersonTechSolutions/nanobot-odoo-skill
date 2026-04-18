@@ -105,6 +105,26 @@ All operations use **smart actions** that handle fuzzy matching and auto-creatio
 - Search and filter tasks by quadrant, state, or employee
 - Track overdue tasks and estimated hours
 
+#### Task Creation Guidelines
+When creating a to-do from a user request, **DO NOT copy the raw request into the title**.
+Process the information and split it into a concise title and a detailed description:
+
+- **Title (`name` / `task_name`)**: A concise 5-10 word action-oriented summary.
+  Start with a verb when possible. Examples: "Follow up on printer jam issue",
+  "Review Q4 budget spreadsheet", "Prep onboarding docs for new hire".
+- **Description (`description`)**: The full context — what the user said, background,
+  specifics, deadlines mentioned, who's involved, and next steps. All the details
+  from the original request belong here, not in the title.
+
+**Example:**
+- User says: *"Hey can you make a task for Ian to follow up on that issue Martin
+  mentioned at the end of his shift about the printer jamming, he said it happened
+  three times today and needs resolution before Monday"*
+- Title: *"Follow up on printer jam issue"*
+- Description: *"Martin reported at shift-end that the printer jammed three times
+  today. Needs resolution before Monday. Talk to Martin for full details on the
+  recurring issue."*
+
 ### eCommerce
 - Publish products to website
 - View website orders and customer activity

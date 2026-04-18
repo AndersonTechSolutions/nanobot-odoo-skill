@@ -72,11 +72,17 @@ class TodoMatrixOps:
         """Create a new to-do task in the priority matrix.
 
         Args:
-            name: Task title.
+            name: Concise 5-10 word action-oriented task title. DO NOT dump the
+                user's full request here — process it and extract a short summary
+                (e.g. "Review Q4 budget" not "Hey can you review the Q4 budget").
+                Start with a verb when possible.
             employee_id: The employee this task is assigned to.
             is_urgent: Whether the task is urgent (Eisenhower axis).
             is_important: Whether the task is important (Eisenhower axis).
-            description: Task description (HTML supported).
+            description: Detailed task context — the full user request, background,
+                specifics, deadlines mentioned, people involved, and next steps.
+                HTML supported. Do NOT leave blank if the user provided any context
+                beyond the bare task name; this is where all the details live.
             deadline: Due date as ``YYYY-MM-DD``.
             date_start: Start datetime as ``YYYY-MM-DDTHH:MM:SS``.
             date_end: End datetime as ``YYYY-MM-DDTHH:MM:SS``.

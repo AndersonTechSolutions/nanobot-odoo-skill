@@ -688,11 +688,17 @@ class SmartActionHandler:
         """Create a to-do task in the priority matrix, resolving employee by name.
 
         Args:
-            task_name: Task title.
+            task_name: Concise 5-10 word action-oriented task title. DO NOT dump
+                the user's full request here — process it and extract a short
+                summary (e.g. "Review Q4 budget" not "Hey can you review the Q4
+                budget"). Start with a verb when possible.
             employee_name: Employee name (fuzzy matched).
             is_urgent: Whether the task is urgent.
             is_important: Whether the task is important.
-            description: Task description.
+            description: Detailed task context — the full user request, background,
+                specifics, deadlines mentioned, people involved, and next steps.
+                Do NOT leave blank if the user provided any context beyond the bare
+                task name; this is where all the details live.
             deadline: Due date as ``YYYY-MM-DD``.
             estimated_time: Estimated hours.
             **kwargs: Additional ``employee.todo.task`` field values.
