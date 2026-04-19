@@ -104,6 +104,7 @@ All operations use **smart actions** that handle fuzzy matching and auto-creatio
 - Manage subtask checklists per task
 - Search and filter tasks by quadrant, state, or employee
 - Track overdue tasks and estimated hours
+- Tag tasks with a warehouse location (`stock.location`) — e.g. "at the Main Warehouse", "in Bay 3"
 
 #### Task Creation Guidelines
 When creating a to-do from a user request, **DO NOT copy the raw request into the title**.
@@ -210,6 +211,7 @@ Process the information and split it into a concise title and a detailed descrip
 - "Show all Do First tasks for the team"
 - "Create a to-do for Sarah: Update docs, important but not urgent"
 - "Add checklist item 'Review code' to to-do #10"
+- "Create a to-do for Ian to inspect pallets at the Main Warehouse" (location auto-resolved)
 
 ### eCommerce
 - "Publish Widget X to the website"

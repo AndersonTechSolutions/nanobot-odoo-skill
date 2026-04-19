@@ -17,7 +17,7 @@ logger = logging.getLogger("odoo_skill")
 _TASK_LIST_FIELDS = [
     "id", "name", "employee_id", "is_urgent", "is_important",
     "eisenhower_quadrant", "state", "priority", "deadline",
-    "estimated_time", "is_overdue",
+    "estimated_time", "is_overdue", "location_id",
 ]
 
 _TASK_DETAIL_FIELDS = _TASK_LIST_FIELDS + [
@@ -67,6 +67,7 @@ class TodoMatrixOps:
         estimated_time: Optional[float] = None,
         priority: Optional[str] = None,
         category_ids: Optional[list[int]] = None,
+        location_id: Optional[int] = None,
         **extra: Any,
     ) -> dict:
         """Create a new to-do task in the priority matrix.
@@ -90,6 +91,8 @@ class TodoMatrixOps:
             priority: Priority level (``'0'``=normal, ``'1'``=low,
                 ``'2'``=high, ``'3'``=urgent).
             category_ids: List of category IDs to tag the task with.
+            location_id: Optional ``stock.location`` ID (internal warehouse
+                location) where this task takes place.
             **extra: Additional ``employee.todo.task`` field values.
 
         Returns:
@@ -115,6 +118,8 @@ class TodoMatrixOps:
             values["priority"] = priority
         if category_ids:
             values["category_ids"] = [(6, 0, category_ids)]
+        if location_id:
+            values["location_id"] = location_id
         values.update(extra)
 
         task_id = self.client.create(self.TASK_MODEL, values)

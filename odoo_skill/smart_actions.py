@@ -674,6 +674,42 @@ class SmartActionHandler:
 
     # ── To-Do Priority Matrix smart actions ───────────────────────────
 
+    def _resolve_location_id(self, location_name: str) -> Optional[int]:
+        """Resolve an internal warehouse location by (fuzzy) name.
+
+        Searches ``stock.location`` for internal-usage locations matching the
+        given name on ``complete_name`` or ``name`` (case-insensitive).
+
+        Args:
+            location_name: Location name or partial match.
+
+        Returns:
+            Location ID, or None if no match is found.
+        """
+        if not location_name:
+            return None
+        locations = self.client.search_read(
+            "stock.location",
+            [
+                "|",
+                ["complete_name", "ilike", location_name],
+                ["name", "ilike", location_name],
+                ["usage", "=", "internal"],
+            ],
+            fields=["id", "name", "complete_name"],
+            limit=5,
+        )
+        if not locations:
+            return None
+        # Prefer exact match on complete_name or name
+        target = location_name.lower()
+        exact = [
+            loc for loc in locations
+            if (loc.get("complete_name") or "").lower() == target
+            or (loc.get("name") or "").lower() == target
+        ]
+        return (exact[0] if exact else locations[0])["id"]
+
     def smart_create_todo(
         self,
         task_name: str,
@@ -683,6 +719,7 @@ class SmartActionHandler:
         description: Optional[str] = None,
         deadline: Optional[str] = None,
         estimated_time: Optional[float] = None,
+        location_name: Optional[str] = None,
         **kwargs: Any,
     ) -> dict:
         """Create a to-do task in the priority matrix, resolving employee by name.
@@ -701,6 +738,9 @@ class SmartActionHandler:
                 task name; this is where all the details live.
             deadline: Due date as ``YYYY-MM-DD``.
             estimated_time: Estimated hours.
+            location_name: Optional warehouse location name (fuzzy matched against
+                ``stock.location`` internal locations). Use when the user mentions
+                a specific warehouse, bay, shelf, or zone.
             **kwargs: Additional ``employee.todo.task`` field values.
 
         Returns:
@@ -709,9 +749,9 @@ class SmartActionHandler:
         Example::
 
             result = smart.smart_create_todo(
-                task_name="Review Q4 budget",
+                task_name="Inspect pallets",
                 employee_name="Ian",
-                is_urgent=True,
+                location_name="Main Warehouse",
                 is_important=True,
                 deadline="2026-04-15",
             )
@@ -730,6 +770,12 @@ class SmartActionHandler:
         # Prefer exact match
         exact = [e for e in employees if e["name"].lower() == employee_name.lower()]
         employee = exact[0] if exact else employees[0]
+
+        # Resolve location by name if provided
+        if location_name and "location_id" not in kwargs:
+            location_id = self._resolve_location_id(location_name)
+            if location_id:
+                kwargs["location_id"] = location_id
 
         task = self.todo_matrix.create_task(
             name=task_name,
