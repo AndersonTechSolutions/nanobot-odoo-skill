@@ -1,7 +1,7 @@
 """
 Smart Action Handler — fuzzy, natural-language-friendly operations.
 
-This is the *key* module for OpenClaw integration. It translates
+This is the *key* module for nanobot integration. It translates
 high-level, imprecise commands ("create a quotation for Rocky with
 5 Rocks") into the precise multi-step Odoo workflows:
   1. Find-or-create the partner "Rocky"
@@ -13,8 +13,11 @@ when necessary, and provide clear feedback about what was found
 vs. what was created.
 """
 
+import json
 import logging
+import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 from .client import OdooClient
@@ -30,6 +33,89 @@ from .models.calendar_ops import CalendarOps
 from .models.todo_matrix import TodoMatrixOps
 
 logger = logging.getLogger("odoo_skill")
+
+
+# Tokenizer for warehouse location phrases. Splits on whitespace and the
+# separators that appear inside complete_name / name values in Odoo.
+_LOC_TOKEN_RE = re.compile(r"[\s/,\-_]+")
+
+# Aliases for phrases a human might say that the tokenizer alone can't
+# reach. Keep this tight — add only when a phrase genuinely can't be
+# resolved by the other passes. Keys are lowercased.
+_LOCATION_ALIASES: dict[str, str] = {
+    "pick station": "Shipping Station",
+    "packing station": "Shipping Station",
+}
+
+# Regex-based rewrites for vocab that the tokenizer alone can't reach.
+# Applied before tokenisation. Keep tight — every entry here is a
+# promise that "humans say X, Odoo stores Y."
+_LOCATION_REWRITES: list[tuple[re.Pattern, str]] = [
+    # "metro rack 09 B"  → "MR09 B"  ;  "metro rack 9" → "MR9"
+    # We keep the trailing "B" so the tokeniser picks up "B" and
+    # narrows down to MR09-B rather than any MR09*.
+    (re.compile(r"(?i)\bmetro\s*rack\s*(\d+)\b"),
+     lambda m: f"MR{int(m.group(1)):02d}"),
+    (re.compile(r"(?i)\bmr\s+(\d+)\b"),
+     lambda m: f"MR{int(m.group(1)):02d}"),
+    # "rolling shelf"     → "RLLNGSHELF"
+    (re.compile(r"(?i)\brolling\s*shelf\b"), "RLLNGSHELF"),
+]
+
+
+def _apply_location_rewrites(phrase: str) -> str:
+    out = phrase
+    for pattern, repl in _LOCATION_REWRITES:
+        out = pattern.sub(repl, out)
+    return out
+
+
+# Learned-vocab file. Populated at runtime by `odoo.py learn-location`,
+# which Andy invokes after Ian confirms a new alias on Telegram.
+# Format:
+#   {
+#     "aliases": { "<human phrase lowercased>": "<canonical Odoo name>", ... },
+#     "version": 1
+#   }
+# Tracked in git so you can audit what vocab Andy has been taught and roll
+# entries back manually if needed.
+_LOCATION_VOCAB_PATH = (
+    Path(__file__).resolve().parent.parent / "location_vocab.json"
+)
+
+
+def _load_learned_aliases() -> dict[str, str]:
+    """Load the Ian-approved learned alias map from disk.
+
+    Returns an empty dict if the file doesn't exist or is malformed —
+    learned vocab is always additive, never required. Corrupt files
+    log a warning so a human notices.
+    """
+    try:
+        raw = _LOCATION_VOCAB_PATH.read_text()
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(raw)
+        aliases = data.get("aliases") or {}
+        if not isinstance(aliases, dict):
+            raise ValueError("aliases is not a dict")
+        return {str(k).lower(): str(v) for k, v in aliases.items()}
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "Could not load learned location vocab from %s: %s — "
+            "falling back to baked aliases only.",
+            _LOCATION_VOCAB_PATH, exc,
+        )
+        return {}
+
+
+def _save_learned_aliases(aliases: dict[str, str]) -> None:
+    """Write the learned alias map to disk atomically."""
+    payload = {"version": 1, "aliases": dict(sorted(aliases.items()))}
+    tmp = _LOCATION_VOCAB_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(_LOCATION_VOCAB_PATH)
 
 
 class SmartActionHandler:
@@ -62,6 +148,225 @@ class SmartActionHandler:
         self.hr = HROps(client)
         self.calendar = CalendarOps(client)
         self.todo_matrix = TodoMatrixOps(client)
+
+        # Learned aliases take precedence over baked-in ones so Ian can
+        # override a bad built-in without editing code.
+        self._location_aliases: dict[str, str] = {
+            **_LOCATION_ALIASES,
+            **_load_learned_aliases(),
+        }
+
+    # ── Location resolution ─────────────────────────────────────────
+    #
+    # Odoo's stock.location records use paths like "AT_WH/WH Stock/02-02-05".
+    # Humans phrase locations every way except the canonical form. The
+    # resolver normalises a human phrase to an internal location id so
+    # task creation can tag warehouse spots without hand-coded mappings.
+
+    @staticmethod
+    def _tokenize_location(phrase: str) -> list[str]:
+        """Split a location phrase into matchable tokens."""
+        return [t for t in _LOC_TOKEN_RE.split(phrase.strip()) if t]
+
+    def _search_locations(self, tokens: list[str]) -> list[dict]:
+        """AND-of-ilike search on stock.location.complete_name for tokens."""
+        if not tokens:
+            return []
+        domain: list = [["usage", "=", "internal"]]
+        for tok in tokens:
+            domain.append(["complete_name", "ilike", tok])
+        return self.client.search_read(
+            "stock.location",
+            domain,
+            fields=["id", "name", "complete_name"],
+            limit=20,
+        )
+
+    def _resolve_location_id(self, location_name: str) -> int:
+        """Resolve an internal stock.location from a human phrase.
+
+        Strategy (first hit wins):
+          1. Alias lookup — swap known phrasings ("pick station")
+             to their canonical stored name.
+          2. Tokenised AND-of-ilike on ``complete_name``.
+          3. Compact-form fallback — strip all separators from the
+             phrase and ilike against ``name`` ("photostudio" →
+             ``PhotoStudio``).
+          4. Zero-pad fallback — strip leading zeros from numeric
+             tokens and retry the AND-of-ilike.
+          5. Exact-match preference — if any candidate's ``name`` or
+             ``complete_name`` matches the phrase case-insensitively,
+             prefer it. Otherwise, when multiple candidates tie on
+             ``complete_name`` (true duplicates in Odoo like the
+             ``02-02-03`` pair), log a warning naming all ids and
+             return the lowest id for stability.
+
+        Args:
+            location_name: Human phrase, e.g. ``"02-02-05"``,
+                ``"wh stock 02-02-05"``, ``"photo studio"``,
+                ``"metro rack 09 B"``, ``"rolling shelf B07"``.
+
+        Returns:
+            The internal ``stock.location`` id.
+
+        Raises:
+            ValueError: If no internal location matches. The message
+                names the unresolved phrase and points to the
+                ``list-locations`` CLI for disambiguation.
+        """
+        if not location_name or not location_name.strip():
+            raise ValueError("Empty location phrase")
+
+        original = location_name.strip()
+        lookup = self._location_aliases.get(original.lower(), original)
+        lookup = _apply_location_rewrites(lookup)
+
+        # Pass 1 — tokenised AND-of-ilike
+        tokens = self._tokenize_location(lookup)
+        candidates = self._search_locations(tokens)
+
+        # Pass 2 — compact form against name
+        if not candidates:
+            compact = re.sub(r"[\s/,\-_]+", "", lookup).lower()
+            if compact:
+                candidates = self.client.search_read(
+                    "stock.location",
+                    [["usage", "=", "internal"], ["name", "ilike", compact]],
+                    fields=["id", "name", "complete_name"],
+                    limit=20,
+                )
+
+        # Pass 3 — zero-pad-normalised tokens
+        if not candidates:
+            normalised = [
+                str(int(t)) if t.isdigit() else t
+                for t in tokens
+            ]
+            if normalised != tokens:
+                candidates = self._search_locations(normalised)
+
+        if not candidates:
+            raise ValueError(
+                f"Could not resolve location '{original}'. No internal "
+                "stock.location matched. Try: python3 skills/odoo/odoo.py "
+                f"list-locations --search '{tokens[0] if tokens else original}'"
+            )
+
+        target = original.lower()
+        exact = [
+            c for c in candidates
+            if (c.get("name") or "").lower() == target
+            or (c.get("complete_name") or "").lower() == target
+        ]
+        if exact:
+            chosen = exact
+        else:
+            chosen = candidates
+
+        # Detect duplicates on complete_name among chosen candidates
+        by_name: dict[str, list[dict]] = {}
+        for c in chosen:
+            by_name.setdefault(c.get("complete_name") or "", []).append(c)
+
+        best_name = min(by_name.keys(), key=lambda n: (0 if n.lower() == target else 1, n))
+        bucket = by_name[best_name]
+        if len(bucket) > 1:
+            ids = sorted(c["id"] for c in bucket)
+            logger.warning(
+                "Location '%s' has duplicate stock.location records at %r: ids %s. "
+                "Returning lowest id %d. Consider deactivating the dupe in Odoo.",
+                original, best_name, ids, ids[0],
+            )
+            return ids[0]
+        return bucket[0]["id"]
+
+    def learn_location(self, phrase: str, target: str) -> dict:
+        """Teach Andy a new location alias after Ian's confirmation.
+
+        Adds ``phrase → target`` to the learned-aliases file at
+        ``skills/odoo/location_vocab.json`` so future resolutions of
+        ``phrase`` short-circuit to the intended location without
+        needing a redeploy.
+
+        Called by Andy ONLY after Ian confirms the mapping on Telegram.
+        Both arguments are required because Andy must state what it
+        heard (the phrase) and what it intends to bind it to (the
+        target location name or complete_name).
+
+        Safety:
+          - The target must itself resolve to a real internal
+            ``stock.location`` via the existing resolver. If it
+            doesn't, the learn call raises ``ValueError`` and no
+            file is written.
+          - Existing phrases are overwritten; a WARNING is logged
+            naming the prior target so there's a trail.
+
+        Args:
+            phrase: The human phrasing that failed to resolve
+                (e.g. ``"kanban wall"``).
+            target: An Odoo location name or complete_name that the
+                resolver already accepts (e.g. ``"KANBAN-01"`` or
+                ``"AT_WH/WH Stock/KANBAN-01"``).
+
+        Returns:
+            Dict with ``phrase``, ``target``, ``resolved_id``,
+            ``resolved_complete_name``, ``previous_target`` (or None),
+            and ``vocab_path`` confirming where it was written.
+
+        Raises:
+            ValueError: If ``phrase`` or ``target`` is empty, or if
+                ``target`` cannot be resolved.
+        """
+        if not phrase or not phrase.strip():
+            raise ValueError("learn_location: phrase must be non-empty")
+        if not target or not target.strip():
+            raise ValueError("learn_location: target must be non-empty")
+
+        key = phrase.strip().lower()
+
+        # Validate target resolves to a real internal location. We call
+        # the resolver directly — if it fails, we do NOT write vocab.
+        resolved_id = self._resolve_location_id(target)
+        resolved_records = self.client.search_read(
+            "stock.location",
+            [["id", "=", resolved_id]],
+            fields=["id", "name", "complete_name"],
+            limit=1,
+        )
+        resolved = resolved_records[0] if resolved_records else {
+            "id": resolved_id, "name": target, "complete_name": target,
+        }
+
+        # Merge and persist. Preserve the baked-in aliases in memory
+        # but only write the learned subset to disk — baked aliases
+        # live in code.
+        learned = _load_learned_aliases()
+        previous_target = learned.get(key)
+        if previous_target is not None and previous_target != target:
+            logger.warning(
+                "Overwriting learned location alias %r: %r → %r",
+                key, previous_target, target,
+            )
+        learned[key] = target
+        _save_learned_aliases(learned)
+
+        # Update this instance's live map too, so the new alias works
+        # immediately without restarting Andy.
+        self._location_aliases[key] = target
+
+        logger.info(
+            "Learned location alias: %r → %r (resolves to id=%d complete_name=%r)",
+            key, target, resolved["id"], resolved.get("complete_name"),
+        )
+
+        return {
+            "phrase": key,
+            "target": target,
+            "resolved_id": resolved["id"],
+            "resolved_complete_name": resolved.get("complete_name"),
+            "previous_target": previous_target,
+            "vocab_path": str(_LOCATION_VOCAB_PATH),
+        }
 
     # ── Find-or-Create primitives ────────────────────────────────────
 
@@ -674,112 +979,110 @@ class SmartActionHandler:
 
     # ── To-Do Priority Matrix smart actions ───────────────────────────
 
-    def _resolve_location_id(self, location_name: str) -> Optional[int]:
-        """Resolve an internal warehouse location by (fuzzy) name.
-
-        Searches ``stock.location`` for internal-usage locations matching the
-        given name on ``complete_name`` or ``name`` (case-insensitive).
-
-        Args:
-            location_name: Location name or partial match.
-
-        Returns:
-            Location ID, or None if no match is found.
-        """
-        if not location_name:
-            return None
-        locations = self.client.search_read(
-            "stock.location",
-            [
-                "|",
-                ["complete_name", "ilike", location_name],
-                ["name", "ilike", location_name],
-                ["usage", "=", "internal"],
-            ],
-            fields=["id", "name", "complete_name"],
-            limit=5,
-        )
-        if not locations:
-            return None
-        # Prefer exact match on complete_name or name
-        target = location_name.lower()
-        exact = [
-            loc for loc in locations
-            if (loc.get("complete_name") or "").lower() == target
-            or (loc.get("name") or "").lower() == target
-        ]
-        return (exact[0] if exact else locations[0])["id"]
-
     def smart_create_todo(
         self,
         task_name: str,
-        employee_name: str,
+        employee_name: Optional[str] = None,
         is_urgent: bool = False,
         is_important: bool = False,
         description: Optional[str] = None,
         deadline: Optional[str] = None,
         estimated_time: Optional[float] = None,
         location_name: Optional[str] = None,
+        employee_names: Optional[list] = None,
+        primary_employee_name: Optional[str] = None,
         **kwargs: Any,
     ) -> dict:
-        """Create a to-do task in the priority matrix, resolving employee by name.
+        """Create a to-do task in the priority matrix, resolving employees by name.
+
+        Supports shared tasks: pass multiple names via ``employee_names`` and
+        optionally designate a primary owner via ``primary_employee_name``.
+        The legacy ``employee_name`` (single string) is still accepted.
 
         Args:
-            task_name: Concise 5-10 word action-oriented task title. DO NOT dump
-                the user's full request here — process it and extract a short
-                summary (e.g. "Review Q4 budget" not "Hey can you review the Q4
-                budget"). Start with a verb when possible.
-            employee_name: Employee name (fuzzy matched).
+            task_name: Task title.
+            employee_name: Single employee name (legacy, fuzzy matched).
+                Ignored when ``employee_names`` is provided.
+            employee_names: List of employee names for a shared task.
+                At least one name is required (either this or
+                ``employee_name``). The first name is the primary unless
+                ``primary_employee_name`` overrides it.
+            primary_employee_name: Name of the primary assignee. Must be
+                one of the names in ``employee_names``. Defaults to the
+                first entry.
             is_urgent: Whether the task is urgent.
             is_important: Whether the task is important.
-            description: Detailed task context — the full user request, background,
-                specifics, deadlines mentioned, people involved, and next steps.
-                Do NOT leave blank if the user provided any context beyond the bare
-                task name; this is where all the details live.
+            description: Task description.
             deadline: Due date as ``YYYY-MM-DD``.
             estimated_time: Estimated hours.
-            location_name: Optional warehouse location name (fuzzy matched against
-                ``stock.location`` internal locations). Use when the user mentions
-                a specific warehouse, bay, shelf, or zone.
+            location_name: Optional warehouse location phrase. Fails loud
+                (``ValueError``) if unresolved.
             **kwargs: Additional ``employee.todo.task`` field values.
 
         Returns:
-            Dict with ``task``, ``employee`` info, ``quadrant``, and ``summary``.
+            Dict with ``task``, ``employees``, ``primary_employee``,
+            ``quadrant``, and ``summary``.
 
-        Example::
+        Example (shared task)::
 
             result = smart.smart_create_todo(
-                task_name="Inspect pallets",
-                employee_name="Ian",
-                location_name="Main Warehouse",
+                task_name="Build foam corners",
+                employee_names=["Martin", "Jasmine"],
+                primary_employee_name="Martin",
+                is_urgent=True,
                 is_important=True,
-                deadline="2026-04-15",
+                deadline="2026-05-08",
             )
         """
-        # Resolve employee by name
-        employees = self.client.search_read(
-            "hr.employee",
-            [["name", "ilike", employee_name], ["active", "=", True]],
-            fields=["id", "name", "job_title", "department_id"],
-            limit=5,
-        )
+        # Normalise to a list of names
+        names: list[str] = []
+        if employee_names:
+            names = list(employee_names)
+        elif employee_name:
+            names = [employee_name]
+        if not names:
+            raise ValueError(
+                "smart_create_todo requires employee_name or employee_names."
+            )
 
-        if not employees:
-            raise ValueError(f"No employee found matching '{employee_name}'")
+        def _resolve(name: str) -> dict:
+            results = self.client.search_read(
+                "hr.employee",
+                [["name", "ilike", name], ["active", "=", True]],
+                fields=["id", "name", "job_title", "department_id"],
+                limit=5,
+            )
+            if not results:
+                raise ValueError(f"No employee found matching '{name}'")
+            exact = [e for e in results if e["name"].lower() == name.lower()]
+            return exact[0] if exact else results[0]
 
-        # Prefer exact match
-        exact = [e for e in employees if e["name"].lower() == employee_name.lower()]
-        employee = exact[0] if exact else employees[0]
+        resolved = [_resolve(n) for n in names]
+        employee_ids = [e["id"] for e in resolved]
 
-        # Resolve location by name if provided
-        if location_name and "location_id" not in kwargs:
-            location_id = self._resolve_location_id(location_name)
-            if location_id:
-                kwargs["location_id"] = location_id
+        # Determine primary
+        primary_emp = resolved[0]
+        if primary_employee_name:
+            pname = primary_employee_name.lower()
+            match = next((e for e in resolved if e["name"].lower() == pname), None)
+            if match is None:
+                raise ValueError(
+                    f"primary_employee_name '{primary_employee_name}' is not in "
+                    f"the resolved assignee list: {[e['name'] for e in resolved]}"
+                )
+            primary_emp = match
+
+        if location_name:
+            kwargs["location_id"] = self._resolve_location_id(location_name)
+
+        category_names = kwargs.pop("category_names", None)
+        if category_names:
+            kwargs["category_ids"] = self.todo_matrix.resolve_category_ids(category_names)
 
         task = self.todo_matrix.create_task(
             name=task_name,
-            employee_id=employee["id"],
+            employee_ids=employee_ids,
+            primary_employee_id=primary_emp["id"],
             is_urgent=is_urgent,
             is_important=is_important,
             description=description,
@@ -788,7 +1091,6 @@ class SmartActionHandler:
             **kwargs,
         )
 
-        # Determine quadrant label
         quadrant_labels = {
             "do": "Do First (urgent + important)",
             "schedule": "Schedule (important, not urgent)",
@@ -796,13 +1098,17 @@ class SmartActionHandler:
             "eliminate": "Eliminate (neither)",
         }
         quadrant = task.get("eisenhower_quadrant", "eliminate")
+        assignee_names = ", ".join(e["name"] for e in resolved)
 
         return {
             "task": task,
-            "employee": employee,
+            "employee": primary_emp,
+            "employees": resolved,
+            "primary_employee": primary_emp,
             "quadrant": quadrant,
             "summary": (
-                f"To-do '{task_name}' created for {employee['name']} "
+                f"To-do '{task_name}' created for {assignee_names} "
+                f"(primary: {primary_emp['name']}) "
                 f"→ {quadrant_labels.get(quadrant, quadrant)}"
             ),
         }
