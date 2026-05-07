@@ -1,0 +1,196 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e5]:
+    - link "Hewlett Packard Enterprise" [ref=e7] [cursor=pointer]:
+      - /url: https://www.hpe.com/us/en/home.html
+      - img [ref=e8]
+    - list [ref=e12]:
+      - listitem [ref=e13]:
+        - link "GreenLake" [ref=e14] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/greenlake.html
+      - listitem [ref=e15]:
+        - link "Products and Solutions" [ref=e16] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/products.html
+      - listitem [ref=e17]:
+        - link "Services" [ref=e18] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/services.html
+      - listitem [ref=e19]:
+        - link "Company" [ref=e20] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/about.html
+      - listitem [ref=e21]:
+        - link "Support" [ref=e22] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/support.html
+    - list [ref=e24]:
+      - listitem [ref=e25]:
+        - link "Search" [ref=e26] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/search-results.html
+          - img
+      - listitem [ref=e27]:
+        - link "Country Selector" [ref=e28] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/country-selector.html?navigateFrom=https%3A%2F%2Fpartsurfermobile.ext.hpe.com%2FSearch%2FSupport
+          - img
+  - generic [ref=e30]:
+    - heading [level=1]
+    - generic [ref=e33]:
+      - paragraph [ref=e34]:
+        - link "Home" [ref=e35] [cursor=pointer]:
+          - /url: /Search/
+          - img "Home" [ref=e36]
+      - heading "HPE PartSurfer Help and Support" [level=2] [ref=e37]
+      - list [ref=e39]:
+        - listitem [ref=e40]:
+          - link "HPE PartSurfer" [ref=e41] [cursor=pointer]:
+            - /url: "#PartSurfer"
+        - listitem [ref=e42]:
+          - link "How to find a Part?" [ref=e43] [cursor=pointer]:
+            - /url: "#findPart"
+        - listitem [ref=e44]:
+          - link "Frequently Asked Questions (FAQ)" [ref=e45] [cursor=pointer]:
+            - /url: "#Faq"
+        - listitem [ref=e46]:
+          - link "Contact Us" [ref=e47] [cursor=pointer]:
+            - /url: "#Contact"
+  - generic [ref=e49]:
+    - generic [ref=e50]:
+      - generic [ref=e51]:
+        - link "Hewlett Packard Enterprise" [ref=e52] [cursor=pointer]:
+          - /url: https://www.hpe.com/us/en/home.html
+          - img [ref=e53]
+        - generic [ref=e56]:
+          - link "How to buy" [ref=e57] [cursor=pointer]:
+            - /url: https://www.hpe.com/us/en/buy-parts-products.html
+            - text: How to buy
+          - link "Product support" [ref=e59] [cursor=pointer]:
+            - /url: https://support.hpe.com/connect/s/
+            - text: Product support
+          - link "Email sales" [ref=e61] [cursor=pointer]:
+            - /url: https://www.hpe.com/us/en/contact-hpe.html
+            - text: Email sales
+        - generic [ref=e63]:
+          - generic [ref=e64]: Follow HPE on
+          - generic [ref=e65]:
+            - link "LinkedIn - new window" [ref=e66] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/hewlett-packard-enterprise
+              - img [ref=e67]
+            - link "X - new window" [ref=e71] [cursor=pointer]:
+              - /url: https://x.com/hpe
+              - img [ref=e72]
+            - link "Instagram - new window" [ref=e74] [cursor=pointer]:
+              - /url: https://www.instagram.com/hpe
+              - img [ref=e75]
+            - link "Threads - new window" [ref=e77] [cursor=pointer]:
+              - /url: https://www.threads.net/@hpe
+              - img [ref=e78]
+            - link "Facebook - new window" [ref=e80] [cursor=pointer]:
+              - /url: https://facebook.com/hewlettpackardenterprise
+              - img [ref=e81]
+            - link "YouTube - new window" [ref=e84] [cursor=pointer]:
+              - /url: https://www.youtube.com/@hpe
+              - img [ref=e85]
+            - link "HPE RSS Feed - new window" [ref=e87] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/newsroom/rss.xml
+              - img [ref=e88]
+      - generic [ref=e90]:
+        - generic [ref=e91]:
+          - generic [ref=e92]: Company
+          - generic [ref=e93]:
+            - link "About HPE" [ref=e94] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/about.html
+            - link "Accessibility" [ref=e95] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/about/accessibility-aging.html
+            - link "Careers" [ref=e96] [cursor=pointer]:
+              - /url: https://careers.hpe.com/us/en
+            - link "Corporate responsibility" [ref=e97] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/living-progress.html
+            - link "HPE Labs" [ref=e98] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/hpe-labs.html
+            - link "HPE Modern Slavery Transparency Statement (PDF)" [ref=e99] [cursor=pointer]:
+              - /url: https://www.hpe.com/psnow/doc/a00005807enw?jumpid=in_pdfviewer-psnow
+            - link "Investor relations" [ref=e100] [cursor=pointer]:
+              - /url: https://investors.hpe.com/
+            - link "Leadership" [ref=e101] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/leadership.html
+            - link "Public policy" [ref=e102] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/living-progress/political-engagement-advocacy.html
+        - generic [ref=e103]:
+          - generic [ref=e104]: Support
+          - generic [ref=e105]:
+            - link "OEM Solutions" [ref=e106] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/oem.html
+            - link "Product return and recycling" [ref=e107] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/about/environment/product-recycling.html
+            - link "Product support" [ref=e108] [cursor=pointer]:
+              - /url: https://support.hpe.com/hpesc/public/home
+            - link "Software and drivers" [ref=e109] [cursor=pointer]:
+              - /url: https://myenterpriselicense.hpe.com/cwp-ui/auth/login
+            - link "Warranty check" [ref=e110] [cursor=pointer]:
+              - /url: https://support.hpe.com/connect/s/warrantycheck
+        - generic [ref=e111]:
+          - generic [ref=e112]: Events and news
+          - generic [ref=e113]:
+            - link "Events" [ref=e114] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/events.html
+            - link "HPE Discover" [ref=e115] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/events/discover-events.html
+            - link "Local events" [ref=e116] [cursor=pointer]:
+              - /url: https://www.hpe.com/h22166/Calendar_hpe.aspx?cc=us&lang=en
+            - link "Newsroom" [ref=e117] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/newsroom.html
+        - generic [ref=e118]:
+          - generic [ref=e119]: Customer resources
+          - generic [ref=e120]:
+            - link "Contact Us" [ref=e121] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/contact-hpe.html
+            - link "Education and training" [ref=e122] [cursor=pointer]:
+              - /url: https://education.hpe.com/us/en/training/index.html
+            - link "Email signup" [ref=e123] [cursor=pointer]:
+              - /url: https://explore.hpe.com/email-preference-center.html?language=en
+            - link "Enterprise glossary" [ref=e124] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/what-is.html
+            - link "Financial services" [ref=e125] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/financing-asset-management-services.html
+            - link "HPE communities" [ref=e126] [cursor=pointer]:
+              - /url: https://community.hpe.com/
+            - link "HPE customer centers" [ref=e127] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/about/customer-centers.html
+            - link "HPE sign in" [ref=e128] [cursor=pointer]:
+              - /url: https://auth.hpe.com/
+            - link "Voice of the Customer signup" [ref=e129] [cursor=pointer]:
+              - /url: https://www.hpe.com/h41268/live/index_e.aspx?qid=29244
+        - generic [ref=e130]:
+          - generic [ref=e131]: Partners
+          - generic [ref=e132]:
+            - link "Alliances" [ref=e133] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/alliance.html
+            - link "Certifications" [ref=e134] [cursor=pointer]:
+              - /url: https://certification-learning.hpe.com/TR/Index.html
+            - link "Find a partner" [ref=e135] [cursor=pointer]:
+              - /url: https://partnerconnect.hpe.com/partners
+            - link "Partner programs" [ref=e136] [cursor=pointer]:
+              - /url: https://www.hpe.com/us/en/partners/partner-ready-vantage.html
+    - generic [ref=e137]:
+      - generic [ref=e139]: © Copyright 2026 Hewlett Packard Enterprise Development LP
+      - list [ref=e141]:
+        - listitem [ref=e142]:
+          - link "Privacy" [ref=e143] [cursor=pointer]:
+            - /url: https://www.hpe.com/us/en/legal/privacy.html
+          - text: "|"
+        - listitem [ref=e144]:
+          - link "Terms of Use" [ref=e145] [cursor=pointer]:
+            - /url: https://www.hpe.com/us/en/about/legal/terms-of-use.html
+          - text: "|"
+        - listitem [ref=e146]:
+          - link "Ad Choices & Cookies" [ref=e147] [cursor=pointer]:
+            - /url: https://www.hpe.com/us/en/legal/privacy.html#datacollection
+          - text: "|"
+        - listitem [ref=e148]:
+          - link "Do not Sell my Personal Information" [ref=e149] [cursor=pointer]:
+            - /url: https://www.hpe.com/us/en/privacy/personal-information.html
+          - text: "|"
+        - listitem [ref=e150]:
+          - link "Sitemap" [ref=e151] [cursor=pointer]:
+            - /url: https://www.hpe.com/us/en/sitemap.html
+  - generic [ref=e152]: wiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwi
+  - generic [ref=e153]: wiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwi
+  - generic [ref=e154]: wiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwi
+  - generic [ref=e155]: wiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwi
+  - generic [ref=e156]: wiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwiwi

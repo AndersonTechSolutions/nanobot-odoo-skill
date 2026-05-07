@@ -982,97 +982,62 @@ class SmartActionHandler:
     def smart_create_todo(
         self,
         task_name: str,
-        employee_name: Optional[str] = None,
+        employee_name: str,
         is_urgent: bool = False,
         is_important: bool = False,
         description: Optional[str] = None,
         deadline: Optional[str] = None,
         estimated_time: Optional[float] = None,
         location_name: Optional[str] = None,
-        employee_names: Optional[list] = None,
-        primary_employee_name: Optional[str] = None,
         **kwargs: Any,
     ) -> dict:
-        """Create a to-do task in the priority matrix, resolving employees by name.
-
-        Supports shared tasks: pass multiple names via ``employee_names`` and
-        optionally designate a primary owner via ``primary_employee_name``.
-        The legacy ``employee_name`` (single string) is still accepted.
+        """Create a to-do task in the priority matrix, resolving employee by name.
 
         Args:
             task_name: Task title.
-            employee_name: Single employee name (legacy, fuzzy matched).
-                Ignored when ``employee_names`` is provided.
-            employee_names: List of employee names for a shared task.
-                At least one name is required (either this or
-                ``employee_name``). The first name is the primary unless
-                ``primary_employee_name`` overrides it.
-            primary_employee_name: Name of the primary assignee. Must be
-                one of the names in ``employee_names``. Defaults to the
-                first entry.
+            employee_name: Employee name (fuzzy matched).
             is_urgent: Whether the task is urgent.
             is_important: Whether the task is important.
             description: Task description.
             deadline: Due date as ``YYYY-MM-DD``.
             estimated_time: Estimated hours.
-            location_name: Optional warehouse location phrase. Fails loud
-                (``ValueError``) if unresolved.
+            location_name: Optional warehouse location phrase. Resolved
+                against internal ``stock.location`` records via the
+                tokeniser. Fails loud (``ValueError``) if unresolved
+                rather than silently dropping the tag.
             **kwargs: Additional ``employee.todo.task`` field values.
 
         Returns:
-            Dict with ``task``, ``employees``, ``primary_employee``,
-            ``quadrant``, and ``summary``.
+            Dict with ``task``, ``employee`` info, ``quadrant``, and ``summary``.
 
-        Example (shared task)::
+        Example::
 
             result = smart.smart_create_todo(
-                task_name="Build foam corners",
-                employee_names=["Martin", "Jasmine"],
-                primary_employee_name="Martin",
+                task_name="Review Q4 budget",
+                employee_name="Ian",
                 is_urgent=True,
                 is_important=True,
-                deadline="2026-05-08",
+                deadline="2026-04-15",
             )
         """
-        # Normalise to a list of names
-        names: list[str] = []
-        if employee_names:
-            names = list(employee_names)
-        elif employee_name:
-            names = [employee_name]
-        if not names:
-            raise ValueError(
-                "smart_create_todo requires employee_name or employee_names."
-            )
+        # Resolve employee by name
+        employees = self.client.search_read(
+            "hr.employee",
+            [["name", "ilike", employee_name], ["active", "=", True]],
+            fields=["id", "name", "job_title", "department_id"],
+            limit=5,
+        )
 
-        def _resolve(name: str) -> dict:
-            results = self.client.search_read(
-                "hr.employee",
-                [["name", "ilike", name], ["active", "=", True]],
-                fields=["id", "name", "job_title", "department_id"],
-                limit=5,
-            )
-            if not results:
-                raise ValueError(f"No employee found matching '{name}'")
-            exact = [e for e in results if e["name"].lower() == name.lower()]
-            return exact[0] if exact else results[0]
+        if not employees:
+            raise ValueError(f"No employee found matching '{employee_name}'")
 
-        resolved = [_resolve(n) for n in names]
-        employee_ids = [e["id"] for e in resolved]
-
-        # Determine primary
-        primary_emp = resolved[0]
-        if primary_employee_name:
-            pname = primary_employee_name.lower()
-            match = next((e for e in resolved if e["name"].lower() == pname), None)
-            if match is None:
-                raise ValueError(
-                    f"primary_employee_name '{primary_employee_name}' is not in "
-                    f"the resolved assignee list: {[e['name'] for e in resolved]}"
-                )
-            primary_emp = match
+        # Prefer exact match
+        exact = [e for e in employees if e["name"].lower() == employee_name.lower()]
+        employee = exact[0] if exact else employees[0]
 
         if location_name:
+            # Raises ValueError if unresolved — caller gets a clear error
+            # with a list-locations hint rather than a silently-dropped tag.
             kwargs["location_id"] = self._resolve_location_id(location_name)
 
         category_names = kwargs.pop("category_names", None)
@@ -1081,8 +1046,7 @@ class SmartActionHandler:
 
         task = self.todo_matrix.create_task(
             name=task_name,
-            employee_ids=employee_ids,
-            primary_employee_id=primary_emp["id"],
+            employee_id=employee["id"],
             is_urgent=is_urgent,
             is_important=is_important,
             description=description,
@@ -1091,6 +1055,7 @@ class SmartActionHandler:
             **kwargs,
         )
 
+        # Determine quadrant label
         quadrant_labels = {
             "do": "Do First (urgent + important)",
             "schedule": "Schedule (important, not urgent)",
@@ -1098,17 +1063,13 @@ class SmartActionHandler:
             "eliminate": "Eliminate (neither)",
         }
         quadrant = task.get("eisenhower_quadrant", "eliminate")
-        assignee_names = ", ".join(e["name"] for e in resolved)
 
         return {
             "task": task,
-            "employee": primary_emp,
-            "employees": resolved,
-            "primary_employee": primary_emp,
+            "employee": employee,
             "quadrant": quadrant,
             "summary": (
-                f"To-do '{task_name}' created for {assignee_names} "
-                f"(primary: {primary_emp['name']}) "
+                f"To-do '{task_name}' created for {employee['name']} "
                 f"→ {quadrant_labels.get(quadrant, quadrant)}"
             ),
         }

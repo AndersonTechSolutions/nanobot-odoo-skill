@@ -1,0 +1,68 @@
+- generic [ref=e3]:
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - banner [ref=e10]:
+        - img [ref=e14] [cursor=pointer]
+      - button "👩 Sign In" [ref=e22] [cursor=pointer]:
+        - generic [ref=e23]: 👩
+        - generic [ref=e24]: Sign In
+    - list [ref=e27]:
+      - listitem [ref=e28]:
+        - link "APIs" [ref=e29] [cursor=pointer]:
+          - /url: /apis
+      - listitem [ref=e30]:
+        - link "Community" [ref=e31] [cursor=pointer]:
+          - /url: https://www.dell.com/community/Developers/ct-p/Developers
+  - main [ref=e33]:
+    - generic [ref=e38]:
+      - generic [ref=e41]:
+        - generic [ref=e42]:
+          - heading "Your Gateway to Powerful APIs" [level=4] [ref=e43]
+          - heading "Smart search, rich previews, and seamless documentation." [level=6] [ref=e44]
+        - search [ref=e48]:
+          - generic [ref=e49]:
+            - searchbox "Search APIs" [ref=e50]
+            - button [ref=e52] [cursor=pointer]:
+              - img [ref=e53]
+      - generic [ref=e57]:
+        - generic [ref=e58]:
+          - generic:
+            - generic:
+              - region:
+                - generic:
+                  - heading "Categories" [level=5]:
+                    - button "Categories" [expanded]:
+                      - text: Categories
+                      - img
+                  - region:
+                    - generic:
+                      - generic:
+                        - generic: Loading Categories
+                - generic:
+                  - heading "API Classification" [level=5]:
+                    - button "API Classification" [expanded]:
+                      - text: API Classification
+                      - img
+                  - region:
+                    - generic:
+                      - button "All APIs":
+                        - text: All APIs
+                        - generic: ✓
+                      - button "Published APIs": Published APIs
+                      - button "Documentation APIs": Documentation APIs
+        - generic [ref=e61]: Loading APIs
+  - contentinfo [ref=e64]:
+    - navigation [ref=e65]:
+      - list [ref=e66]:
+        - listitem [ref=e67]:
+          - generic [ref=e68]: © 2026 Dell Technologies
+        - listitem [ref=e69]:
+          - generic [ref=e70]: "|"
+        - listitem [ref=e71]:
+          - link "Privacy" [ref=e72] [cursor=pointer]:
+            - /url: https://www.dell.com/learn/us/en/uscorp1/policies-privacy
+        - listitem [ref=e73]:
+          - generic [ref=e74]: "|"
+        - listitem [ref=e75]:
+          - link "Terms of Use" [ref=e76] [cursor=pointer]:
+            - /url: https://www.dell.com/learn/us/en/uscorp1/terms-of-sale

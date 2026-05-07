@@ -1,5 +1,5 @@
 """
-OdooConnector — OpenClaw Skill for Odoo ERP integration.
+OdooConnector — nanobot skill for Odoo 17 ERP integration.
 
 Provides a unified interface to Odoo's CRM, Sales, Invoicing,
 Inventory, Purchase, Project, HR, Manufacturing, Calendar, Fleet,

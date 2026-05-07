@@ -1,0 +1,339 @@
+- generic [ref=e1]:
+  - complementary "contacus-slider-section"
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - link "Skip to main content" [ref=e5] [cursor=pointer]:
+        - /url: "#mh-main"
+      - generic [ref=e6]:
+        - generic [ref=e7]:
+          - link "Dell Technologies Home" [ref=e9] [cursor=pointer]:
+            - /url: //www.dell.com/en-us
+            - img [ref=e11]
+          - search [ref=e13]:
+            - combobox "Search Dell or identify your product" [ref=e14]
+            - button "Search Dell or identify your product" [ref=e16] [cursor=pointer]
+        - generic [ref=e17]:
+          - button "Sign In" [ref=e20]:
+            - generic [ref=e21] [cursor=pointer]:
+              - img [ref=e23]
+              - generic [ref=e25]: Sign In
+          - link "Contact Us" [ref=e28] [cursor=pointer]:
+            - /url: https://www.dell.com/en-us/lp/contact-us
+            - generic [ref=e30]: Contact Us
+          - button "US/EN Location & Language selection, Selected United States English" [ref=e33]:
+            - generic [ref=e34] [cursor=pointer]: US/EN
+          - button "Cart" [ref=e37]:
+            - generic [ref=e38] [cursor=pointer]:
+              - img [ref=e40]
+              - generic [ref=e43]: Cart
+      - navigation [ref=e46]:
+        - menu [ref=e47]:
+          - menuitem "Products" [ref=e48] [cursor=pointer]
+          - menuitem "Solutions" [ref=e49] [cursor=pointer]
+          - menuitem "Services" [ref=e50] [cursor=pointer]
+          - menuitem "Support" [ref=e51] [cursor=pointer]:
+            - generic [ref=e52]: Support
+    - main [ref=e53]:
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - navigation "Support Navigation" [ref=e57]:
+            - list [ref=e59]:
+              - listitem [ref=e60]:
+                - link "Back to Home" [ref=e61] [cursor=pointer]:
+                  - /url: https://www.dell.com/support/home/en-us
+                  - generic [ref=e62]: 〈
+                  - generic [ref=e63]: Back to Home
+              - listitem [ref=e64]:
+                - link "Overview" [ref=e65] [cursor=pointer]:
+                  - /url: /support/product-details/en-us/servicetag/0000000/overview
+                  - img [ref=e66]: 
+                  - generic [ref=e67]: Overview
+              - listitem [ref=e68]:
+                - link "Drivers & Downloads" [ref=e69] [cursor=pointer]:
+                  - /url: /support/product-details/en-us/servicetag/0000000/drivers
+                  - img [ref=e70]: ⚙
+                  - generic [ref=e71]: Drivers & Downloads
+              - listitem [ref=e72]:
+                - button "Support Resources" [expanded] [ref=e73]:
+                  - img [ref=e74]: 
+                  - generic [ref=e75]: Support Resources
+                  - img [ref=e76]
+                - list [ref=e78]:
+                  - listitem [ref=e79]:
+                    - link "Search All Resources" [ref=e80] [cursor=pointer]:
+                      - /url: /support/product-details/en-us/servicetag/0000000/resources/search
+                      - generic [ref=e81]: Search All Resources
+                  - listitem [ref=e82]:
+                    - link "Manuals & Documents" [ref=e83] [cursor=pointer]:
+                      - /url: /support/product-details/en-us/servicetag/0000000/resources/manuals
+                      - generic [ref=e84]: Manuals & Documents
+                  - listitem [ref=e85]:
+                    - link "Articles" [ref=e86] [cursor=pointer]:
+                      - /url: /support/product-details/en-us/servicetag/0000000/resources/articles
+                      - generic [ref=e87]: Articles
+                  - listitem [ref=e88]:
+                    - link "Videos" [ref=e89] [cursor=pointer]:
+                      - /url: /support/product-details/en-us/servicetag/0000000/resources/videos
+                      - generic [ref=e90]: Videos
+                  - listitem [ref=e91]:
+                    - link "Regulatory" [ref=e92] [cursor=pointer]:
+                      - /url: /support/product-details/en-us/servicetag/0000000/resources/regulatory
+                      - generic [ref=e93]: Regulatory
+              - listitem [ref=e94]:
+                - link "Service Events" [ref=e95] [cursor=pointer]:
+                  - /url: /support/product-details/en-us/servicetag/0000000/events
+                  - img [ref=e96]: 
+                  - generic [ref=e97]: Service Events
+              - listitem [ref=e98]:
+                - link "Parts & Repairs" [ref=e99] [cursor=pointer]:
+                  - /url: /support/product-details/en-us/servicetag/0000000/upgrade
+                  - img [ref=e100]: 🛒
+                  - generic [ref=e101]: Parts & Repairs
+            - generic [ref=e102]:
+              - button "Collapse side navigation" [ref=e103] [cursor=pointer]:
+                - generic [ref=e104]: 〈
+              - text: 〉
+          - text: ﹀ 🏡  ⚙   🛒
+        - main [ref=e106]:
+          - generic [ref=e108]:
+            - navigation "breadcrumbs" [ref=e112]:
+              - list [ref=e113]:
+                - listitem [ref=e114]:
+                  - link "Dell Technologies Home" [ref=e115] [cursor=pointer]:
+                    - /url: https://www.dell.com
+                    - img [ref=e116]:
+                      - img [ref=e117]
+                - listitem [ref=e119]:
+                  - link "Support Home" [ref=e120] [cursor=pointer]:
+                    - /url: https://www.dell.com/support/home/en-us
+                - listitem [ref=e121]:
+                  - generic [ref=e122]: Overview
+            - generic [ref=e124]:
+              - generic [ref=e127]:
+                - text: Get full access.
+                - link "Sign In" [ref=e128] [cursor=pointer]:
+                  - /url: https://www.dell.com/dci/fp/session/authorize?client_id=3a4eea6a-4a4e-4f2e-be4a-adc5d51a357a&redirect_uri=https%3A%2F%2Fwww.dell.com%2Fsupport%2Fproduct-details%2Fen-us%2Fservicetag%2F0000000%2Fconfiguration
+                  - generic [ref=e129]: Sign In
+                - link "Create Account" [ref=e130] [cursor=pointer]:
+                  - /url: https://www.dell.com/di/v3/fp/session/authorize?client_id=3a4eea6a-4a4e-4f2e-be4a-adc5d51a357a&action=register&redirect_uri=https%3A%2F%2Fwww.dell.com%2Fsupport%2Fproduct-details%2Fen-us%2Fservicetag%2F0000000%2Fconfiguration
+                  - generic [ref=e131]: Create Account
+              - generic [ref=e132]:
+                - img "Dell Pro Max with GB10 FCM1253 image" [ref=e135]
+                - text: 🖎
+                - generic [ref=e136]:
+                  - heading "Dell Pro Max with GB10 FCM1253" [level=1] [ref=e137]: 🖎 Dell Pro Max with GB10 FCM1253
+                  - generic [ref=e139]:
+                    - generic [ref=e140]: "Service Tag: 0000000"
+                    - link "Log In to Add Alias" [ref=e142] [cursor=pointer]:
+                      - /url: https://www.dell.com/dci/fp/session/authorize?client_id=3a4eea6a-4a4e-4f2e-be4a-adc5d51a357a&redirect_uri=https%3A%2F%2Fwww.dell.com%2Fsupport%2Fproduct-details%2Fen-us%2Fservicetag%2F0000000%2Fconfiguration?openalias=true
+                - text: 🖴
+                - region [ref=e154]:
+                  - heading "Quick links" [level=5] [ref=e156]:
+                    - button "Quick links" [ref=e157] [cursor=pointer]:
+                      - text: Quick links
+                      - img [ref=e158]
+          - generic [ref=e165]: Loading overview
+          - generic [ref=e167]:
+            - navigation [ref=e168]:
+              - generic [ref=e169]:
+                - generic [ref=e170]:
+                  - button "US/EN Location & Language selection, Selected United States English" [ref=e173] [cursor=pointer]:
+                    - generic [ref=e174]: US/EN
+                  - link "Site Map" [ref=e176] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/sitemap
+                - generic [ref=e177]:
+                  - heading "Account" [level=3]:
+                    - generic: Account
+                  - list "Account" [ref=e178]:
+                    - listitem [ref=e179]:
+                      - link "My Account" [ref=e180] [cursor=pointer]:
+                        - /url: //www.dell.com/myaccount/en-us
+                    - listitem [ref=e181]:
+                      - link "Order Status" [ref=e182] [cursor=pointer]:
+                        - /url: //www.dell.com/myaccount/en-us/orders
+                    - listitem [ref=e183]:
+                      - link "Profile Settings" [ref=e184] [cursor=pointer]:
+                        - /url: //www.dell.com/myaccount/en-us/account-settings/profile
+                    - listitem [ref=e185]:
+                      - link "My Products" [ref=e186] [cursor=pointer]:
+                        - /url: //www.dell.com/support/mps/en-us/myproducts
+                    - listitem [ref=e187]:
+                      - link "Make a Payment" [ref=e188] [cursor=pointer]:
+                        - /url: //dfs.dell.com/#/?lang=en-us
+                    - listitem [ref=e189]:
+                      - link "Dell Rewards Balance" [ref=e190] [cursor=pointer]:
+                        - /url: //www.dell.com/myaccount/en-us/rewards
+                - generic [ref=e191]:
+                  - heading "Support" [level=3]:
+                    - generic: Support
+                  - list "Support" [ref=e192]:
+                    - listitem [ref=e193]:
+                      - link "Support Home" [ref=e194] [cursor=pointer]:
+                        - /url: //www.dell.com/support/home/en-us
+                    - listitem [ref=e195]:
+                      - link "Contact Technical Support" [ref=e196] [cursor=pointer]:
+                        - /url: //www.dell.com/support/incidents-online/en-us/contactus/dynamic?spestate
+                    - listitem [ref=e197]:
+                      - link "Returns" [ref=e198] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/return-policy
+                - generic [ref=e199]:
+                  - heading "Connect with Us" [level=3]:
+                    - generic: Connect with Us
+                  - list "Connect with Us" [ref=e200]:
+                    - listitem [ref=e201]:
+                      - link "Community" [ref=e202] [cursor=pointer]:
+                        - /url: //www.dell.com/community/en/categories/dell-community
+                    - listitem [ref=e203]:
+                      - link "Contact Us" [ref=e204] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/contact-us
+                    - listitem [ref=e205]:
+                      - link "X (Twitter)" [ref=e206] [cursor=pointer]:
+                        - /url: //x.com/delltech?lang=en
+                    - listitem [ref=e207]:
+                      - link "LinkedIn" [ref=e208] [cursor=pointer]:
+                        - /url: //www.linkedin.com/company/delltechnologies
+                    - listitem [ref=e209]:
+                      - link "Instagram" [ref=e210] [cursor=pointer]:
+                        - /url: //www.instagram.com/delltech/
+                    - listitem [ref=e211]:
+                      - link "YouTube" [ref=e212] [cursor=pointer]:
+                        - /url: //www.youtube.com/delltechnologies
+              - generic [ref=e213]:
+                - generic [ref=e214]:
+                  - heading "Our Offerings" [level=3]:
+                    - generic: Our Offerings
+                  - list "Our Offerings" [ref=e215]:
+                    - listitem [ref=e216]:
+                      - link "Artificial Intelligence" [ref=e217] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/shop/scc/sc/artificial-intelligence
+                    - listitem [ref=e218]:
+                      - link "Products" [ref=e219] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us
+                    - listitem [ref=e220]:
+                      - link "Solutions" [ref=e221] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/solutions
+                    - listitem [ref=e222]:
+                      - link "Services" [ref=e223] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/services
+                    - listitem [ref=e224]:
+                      - link "Deals" [ref=e225] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/shop/deals
+                - generic [ref=e226]:
+                  - heading "Our Company" [level=3]:
+                    - generic: Our Company
+                  - list "Our Company" [ref=e227]:
+                    - listitem [ref=e228]:
+                      - link "Who We Are" [ref=e229] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/who-we-are
+                    - listitem [ref=e230]:
+                      - link "Careers" [ref=e231] [cursor=pointer]:
+                        - /url: //jobs.dell.com/
+                    - listitem [ref=e232]:
+                      - link "Dell Technologies Capital" [ref=e233] [cursor=pointer]:
+                        - /url: //www.delltechnologiescapital.com
+                    - listitem [ref=e234]:
+                      - link "Investors" [ref=e235] [cursor=pointer]:
+                        - /url: //investors.delltechnologies.com
+                    - listitem [ref=e236]:
+                      - link "Newsroom" [ref=e237] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/dt/corporate/newsroom.htm
+                    - listitem [ref=e238]:
+                      - link "Recycling" [ref=e239] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/recovery-recycling-consumer-solutions
+                    - listitem [ref=e240]:
+                      - link "Corporate Impact" [ref=e241] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/corporate-impact
+                    - listitem [ref=e242]:
+                      - link "Customer Stories" [ref=e243] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/customer-stories
+                - generic [ref=e244]:
+                  - heading "Our Partners" [level=3]:
+                    - generic: Our Partners
+                  - list "Our Partners" [ref=e245]:
+                    - listitem [ref=e246]:
+                      - link "Find a Partner" [ref=e247] [cursor=pointer]:
+                        - /url: //www.delltechnologies.com/partner/en-us/partner/find-a-partner.htm
+                    - listitem [ref=e248]:
+                      - link "Find a Reseller" [ref=e249] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/reseller_store_locator
+                    - listitem [ref=e250]:
+                      - link "OEM Solutions" [ref=e251] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/oem-solutions
+                    - listitem [ref=e252]:
+                      - link "Partner Program" [ref=e253] [cursor=pointer]:
+                        - /url: //www.delltechnologies.com/partner/en-us/partner/partner.htm
+                - generic [ref=e254]:
+                  - heading "Resources" [level=3]:
+                    - generic: Resources
+                  - list "Resources" [ref=e255]:
+                    - listitem [ref=e256]:
+                      - link "Blog" [ref=e257] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/blog/
+                    - listitem [ref=e258]:
+                      - link "Dell Rewards" [ref=e259] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dell-rewards
+                    - listitem [ref=e260]:
+                      - link "Events" [ref=e261] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/dt/events/index.htm
+                    - listitem [ref=e262]:
+                      - link "Email Sign-Up" [ref=e263] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/dt/forms/csb/unified-signup.htm
+                    - listitem [ref=e264]:
+                      - link "Specialty Product Collections" [ref=e265] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/shopping/pt/index
+                    - listitem [ref=e266]:
+                      - link "Privacy Center" [ref=e267] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/privacy-center
+                    - listitem [ref=e268]:
+                      - link "Security & Trust Center" [ref=e269] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/security-and-trust-center
+                    - listitem [ref=e270]:
+                      - link "Trial Software Downloads" [ref=e271] [cursor=pointer]:
+                        - /url: //www.dell.com/en-us/lp/dt/software-downloads
+            - navigation [ref=e272]:
+              - list [ref=e273]:
+                - listitem [ref=e274]:
+                  - link "Dell Technologies" [ref=e275] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us
+                - listitem [ref=e276]:
+                  - link "Dell Premier for Business" [ref=e277] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/dt/dell-premier
+                - listitem [ref=e278]:
+                  - link "Dell Financial Services" [ref=e279] [cursor=pointer]:
+                    - /url: //dfs.dell.com/#/?lang=en-us
+            - navigation [ref=e280]:
+              - list [ref=e281]:
+                - listitem [ref=e282]:
+                  - link "Copyright © 2026 Dell Inc." [ref=e283] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/legal/site-terms-of-use-copyright
+                - listitem [ref=e284]:
+                  - link "Terms of Sale" [ref=e285] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/legal/terms-of-sale
+                - listitem [ref=e286]:
+                  - link "Privacy Statement" [ref=e287] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/legal/policies-privacy
+                - listitem [ref=e288]:
+                  - link "Do Not Sell or Share My Personal Information" [ref=e289] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/do-not-sell-my-info
+                - listitem [ref=e290]:
+                  - link "Cookies, Ads & Emails" [ref=e291] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/legal/policies-cookies-ads-emails
+                - listitem [ref=e292]:
+                  - link "Legal & Regulatory" [ref=e293] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/legal/terms
+                - listitem [ref=e294]:
+                  - link "Accessibility" [ref=e295] [cursor=pointer]:
+                    - /url: //www.dell.com/en-us/lp/accessibility
+                - listitem [ref=e296]:
+                  - link "Anti-Slavery, Human Trafficking & Child Labor" [ref=e297] [cursor=pointer]:
+                    - /url: //www.delltechnologies.com/asset/en-us/solutions/business-solutions/legal-pricing/statement-against-modern-slavery-human-trafficking-and-child-labor.pdf
+      - generic:
+        - dialog "Virtual Assistant" [ref=e298]:
+          - generic [ref=e300]:
+            - generic [ref=e301]:
+              - heading "Virtual Assistant" [level=6] [ref=e302]
+              - button "close popover" [active] [ref=e303]:
+                - img [ref=e304]
+            - generic [ref=e306]: Hello, I can help you troubleshoot an issue or find support information.
+        - button "Dell Virtual Assistant - Frequently Asked Questions" [ref=e307] [cursor=pointer]:
+          - img [ref=e308]

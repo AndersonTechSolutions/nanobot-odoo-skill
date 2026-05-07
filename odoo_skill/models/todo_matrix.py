@@ -68,8 +68,7 @@ def _format_description_html(text: Optional[str]) -> Optional[str]:
     return "".join(out)
 
 _TASK_LIST_FIELDS = [
-    "id", "name", "employee_ids", "primary_employee_id",
-    "is_urgent", "is_important",
+    "id", "name", "employee_id", "is_urgent", "is_important",
     "eisenhower_quadrant", "state", "priority", "deadline",
     "estimated_time", "is_overdue", "date_start", "create_date",
     "reminder_datetime", "reminder_sent",
@@ -114,9 +113,7 @@ class TodoMatrixOps:
     def create_task(
         self,
         name: str,
-        employee_id: Optional[int] = None,
-        employee_ids: Optional[list[int]] = None,
-        primary_employee_id: Optional[int] = None,
+        employee_id: int,
         is_urgent: bool = False,
         is_important: bool = False,
         description: Optional[str] = None,
@@ -132,23 +129,9 @@ class TodoMatrixOps:
     ) -> dict:
         """Create a new to-do task in the priority matrix.
 
-        ``employee.todo.task`` supports multi-assignee. Pass a list via
-        ``employee_ids`` for shared tasks; the legacy single-employee
-        ``employee_id`` parameter is still accepted for backward compat
-        and is translated to a one-item ``employee_ids`` plus
-        ``primary_employee_id``.
-
         Args:
             name: Task title.
-            employee_id: Single assignee (legacy). When set without
-                ``employee_ids`` the task gets one assignee, with this
-                employee as primary.
-            employee_ids: Full assignee list. Required if ``employee_id``
-                is not provided. The task must have at least one assignee.
-            primary_employee_id: The "owner" assignee — drives Todoist
-                sync, reminders, and kanban grouping. Defaults to the
-                first id in ``employee_ids``. Must appear in
-                ``employee_ids``.
+            employee_id: The employee this task is assigned to.
             is_urgent: Whether the task is urgent (Eisenhower axis).
             is_important: Whether the task is important (Eisenhower axis).
             description: Task description (HTML supported).
@@ -159,31 +142,16 @@ class TodoMatrixOps:
             priority: Priority level (``'0'``=normal, ``'1'``=low,
                 ``'2'``=high, ``'3'``=urgent).
             category_ids: List of category IDs to tag the task with.
-            reminder_datetime: When to remind the primary assignee, as
+            reminder_datetime: When to remind the employee, as
                 ``YYYY-MM-DD HH:MM:SS`` (UTC).
             **extra: Additional ``employee.todo.task`` field values.
 
         Returns:
             The newly created task record.
         """
-        if not employee_ids and employee_id:
-            employee_ids = [employee_id]
-        if not employee_ids:
-            raise ValueError(
-                "create_task requires employee_ids (or legacy employee_id)."
-            )
-        if primary_employee_id is None:
-            primary_employee_id = employee_ids[0]
-        elif primary_employee_id not in employee_ids:
-            raise ValueError(
-                f"primary_employee_id={primary_employee_id} must be one of "
-                f"employee_ids={employee_ids}."
-            )
-
         values: dict[str, Any] = {
             "name": name,
-            "employee_ids": [(6, 0, employee_ids)],
-            "primary_employee_id": primary_employee_id,
+            "employee_id": employee_id,
             "is_urgent": is_urgent,
             "is_important": is_important,
         }
@@ -209,10 +177,7 @@ class TodoMatrixOps:
         values.update(extra)
 
         task_id = self.client.create(self.TASK_MODEL, values)
-        logger.info(
-            "Created todo task %r for employees=%s primary=%d → id=%d",
-            name, employee_ids, primary_employee_id, task_id,
-        )
+        logger.info("Created todo task %r for employee=%d → id=%d", name, employee_id, task_id)
         return self._read_task(task_id)
 
     def get_task(self, task_id: int) -> dict:
@@ -264,9 +229,7 @@ class TodoMatrixOps:
         """Search to-do tasks with optional filters.
 
         Args:
-            employee_id: Filter to tasks where this employee is one of
-                the assignees (covers both single- and multi-assignee
-                tasks; matches against ``employee_ids``).
+            employee_id: Filter by assigned employee.
             quadrant: Filter by Eisenhower quadrant
                 (``do``, ``schedule``, ``delegate``, ``eliminate``).
             state: Filter by state
@@ -281,7 +244,7 @@ class TodoMatrixOps:
         """
         domain: list = []
         if employee_id:
-            domain.append(["employee_ids", "in", [employee_id]])
+            domain.append(["employee_id", "=", employee_id])
         if quadrant:
             domain.append(["eisenhower_quadrant", "=", quadrant])
         if state:
@@ -369,7 +332,7 @@ class TodoMatrixOps:
             lists, plus ``summary`` counts.
         """
         domain = [
-            ["employee_ids", "in", [employee_id]],
+            ["employee_id", "=", employee_id],
             ["state", "in", ["todo", "in_progress"]],
         ]
         tasks = self.client.search_read(
