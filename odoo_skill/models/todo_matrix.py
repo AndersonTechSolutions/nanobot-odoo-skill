@@ -68,7 +68,7 @@ def _format_description_html(text: Optional[str]) -> Optional[str]:
     return "".join(out)
 
 _TASK_LIST_FIELDS = [
-    "id", "name", "employee_id", "is_urgent", "is_important",
+    "id", "name", "primary_employee_id", "employee_ids", "is_urgent", "is_important",
     "eisenhower_quadrant", "state", "priority", "deadline",
     "estimated_time", "is_overdue", "date_start", "create_date",
     "reminder_datetime", "reminder_sent",
@@ -151,7 +151,8 @@ class TodoMatrixOps:
         """
         values: dict[str, Any] = {
             "name": name,
-            "employee_id": employee_id,
+            "primary_employee_id": employee_id,
+            "employee_ids": [(6, 0, [employee_id])],
             "is_urgent": is_urgent,
             "is_important": is_important,
         }
@@ -244,7 +245,7 @@ class TodoMatrixOps:
         """
         domain: list = []
         if employee_id:
-            domain.append(["employee_id", "=", employee_id])
+            domain.append(["employee_ids", "in", [employee_id]])
         if quadrant:
             domain.append(["eisenhower_quadrant", "=", quadrant])
         if state:
@@ -332,7 +333,7 @@ class TodoMatrixOps:
             lists, plus ``summary`` counts.
         """
         domain = [
-            ["employee_id", "=", employee_id],
+            ["employee_ids", "in", [employee_id]],
             ["state", "in", ["todo", "in_progress"]],
         ]
         tasks = self.client.search_read(
