@@ -313,7 +313,8 @@ def cmd_list_todos(args):
         employees = smart.todo_matrix.search_employees(query=args.employee)
         if not employees:
             _err(f"No employee found matching '{args.employee}'")
-        employee_id = employees[0]["id"]
+        exact = [e for e in employees if e["name"].lower() == args.employee.lower()]
+        employee_id = (exact[0] if exact else employees[0])["id"]
     result = smart.todo_matrix.search_tasks(
         employee_id=employee_id,
         quadrant=args.quadrant,
