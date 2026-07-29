@@ -38,7 +38,7 @@ pip install -r skills/odoo/requirements.txt
 python3 skills/odoo/odoo.py "<command>"
 ```
 
-All commands accept natural language. The skill resolves names to Odoo IDs automatically using fuzzy (case-insensitive `ilike`) matching and creates missing records when needed.
+The skill resolves names to Odoo IDs using fuzzy (case-insensitive `ilike`) matching. Missing records are **not** created unless you pass `--allow-create`.
 
 ## Command Reference
 
@@ -70,7 +70,7 @@ All commands accept natural language. The skill resolves names to Odoo IDs autom
 All smart actions follow the same pattern: search first, create only if needed, report what was found vs. created.
 
 - **Fuzzy matching** -- case-insensitive `ilike` searches on the `name` field
-- **Auto-creation** -- missing customers, products, vendors, projects, and departments are created on the fly
+- **Auto-creation is opt-in** -- a lookup miss returns `needs_confirmation` with near matches and writes nothing. Pass `--allow-create` (CLI) or `allow_create=True` (Python) to create missing customers, products, vendors, projects, and departments. Changed in v3.0.0; previously creation was unconditional.
 - **No IDs needed** -- use names everywhere; the skill resolves them to Odoo record IDs
 
 ## Example Usage
@@ -110,6 +110,93 @@ python3 skills/odoo/odoo.py "todo matrix for Ian"
 python3 skills/odoo/odoo.py "check stock for Widget X"
 ```
 
+
+## Custom Modules (AndersonTech)
+
+The subcommands above cover core Odoo. The AndersonTech custom modules add
+~229 methods, reached through four generic commands rather than one
+subcommand each.
+
+```bash
+python3 odoo.py list-ops                      # namespaces + whether each module is installed
+python3 odoo.py list-ops repairs              # methods, signatures, and which ones write
+python3 odoo.py describe-op repairs.create_repair
+python3 odoo.py list-actions rmas             # allowlisted Odoo button methods
+python3 odoo.py call repairs.bench_summary
+python3 odoo.py call rmas.awaiting_approval --args '{"limit": 10}'
+python3 odoo.py call repairs.create_repair \
+  --args '{"partner_id": 42, "reported_problem": "No power"}' --confirm
+```
+
+Any method whose name implies a write (`create`, `update`, `set`, `post`,
+`apply`, `publish`, `schedule`, `run_action`, ...) refuses to run without
+`--confirm`. The refusal happens before any RPC.
+
+| Namespace | Model | Module | Examples |
+|---|---|---|---|
+| `repairs` | `repair.order` | `atech_repair` | `bench_summary`, `overdue_repairs`, `awaiting_parts`, `find_by_serial`, `create_repair` |
+| `rmas` | `rma.order` | `atech_rma` | `pipeline_summary`, `awaiting_approval`, `ready_to_execute`, `ebay_rmas`, `create_rma` |
+| `warranty` | `warranty.registration` | `atech_warranty` | `check_coverage`, `expiring_soon`, `open_claims`, `create_claim` |
+| `consignment` | `consignment.order` | `atech_consignment` | `pipeline_summary`, `items_awaiting_payout`, `set_pricing` |
+| `helpdesk` | `helpdesk.ticket` | `atech_helpdesk` | `desk_summary`, `ebay_action_needed`, `draft_ai_reply` |
+| `messaging` | `atech.conversation` | `atech_messaging` | `inbox_summary`, `unread`, `get_thread`, `reply` |
+| `field_service` | `project.task` (FSM) | `atech_field_service` | `dispatch_summary`, `unscheduled_jobs`, `schedule` |
+| `ebay` | `ebay.listing` | `sale_ebay` | `listing_summary`, `research_comps`, `get_pricing`, `apply_suggested_price`, `publish` |
+| `product_drafts` | `quick.product.draft` | `quick_product`, `new_product_gui` | `attention_needed`, `stalled_drafts`, `ai_spend_summary` |
+| `itad` | `tasks` | `projects-custom` | `ops_summary`, `upcoming_pickups`, `sla_at_risk`, `schedule_pickup` |
+
+### Odoo button methods
+
+Status transitions go through the module's own button methods, never a raw
+write to `state`. On `repair.order` this is mandatory — `state` is computed
+from `stage_id` and is readonly. Elsewhere it is still correct, because
+writing `state` directly skips the side effects (emails, pickings, resolution
+execution).
+
+Each ops class carries an explicit `ALLOWED_ACTIONS` allowlist, because
+`execute_kw` will otherwise invoke *any* public method including `unlink`.
+Deliberately excluded: `quick.product.draft.action_commit` (creates a
+permanent catalogue product) and all ITAD buttons (compliance weight).
+
+### eBay repricing is proposal-first
+
+The pricing engine lives in Odoo (`sale_ebay`), not here — it researches
+comps and computes a suggestion clamped by a cost floor
+(`sale_ebay.reducer_min_margin`). Reading a suggestion is free; applying it
+is separate and guarded three ways: no actionable suggestion, a cut above
+`max_discount_pct` (default 25%), or a missing inner `confirm: true` all
+refuse.
+
+```bash
+python3 odoo.py call ebay.repricing_candidates --args '{"min_days_listed": 14}'
+python3 odoo.py call ebay.get_pricing --args '{"product_tmpl_id": 4211}'
+python3 odoo.py call ebay.apply_suggested_price \
+  --args '{"product_tmpl_id": 4211, "confirm": true}' --confirm
+```
+
+`stale_comps` lists listed products whose comps have never been fetched —
+their suggestions mean nothing until `research_comps` runs.
+
+### Non-stored computed fields
+
+Some custom fields are computed and **not stored**. A domain over one is not
+rejected — Odoo silently drops the clause and returns the *unfiltered* set,
+producing plausible but wrong answers. These are filtered client-side
+instead:
+
+| Model | Field |
+|---|---|
+| `repair.order` | `is_overdue`, `is_awaiting_parts` |
+| `rma.order` | `can_execute_resolutions`, `advance_return_overdue` |
+| `tasks` (ITAD) | `itad_can_dispatch`, `itad_can_price`, `itad_can_receive`, `sla_days_remaining` |
+
+And three with stored twins, used instead: `project.task.is_fsm` →
+`project_id.is_fsm`; `helpdesk.ticket.ebay_order_number` →
+`ebay_order_id.name`; `quick.product.draft.price_confidence_pct` →
+`price_confidence`.
+
+**Check `store` before adding any filter.**
+
 ## Python API
 
 For direct programmatic access, import the skill:
@@ -133,9 +220,14 @@ See `references/python-api.md` for the full API reference covering all Ops class
 
 The skill uses custom exceptions from `odoo_skill.errors`:
 
-- `OdooAuthError` -- bad credentials or expired API key
-- `OdooNotFoundError` -- record does not exist
-- `OdooError` -- general Odoo XML-RPC error
+- `OdooError` -- base class for all Odoo errors
+- `OdooConnectionError` -- network failure after retries
+- `OdooAuthenticationError` -- bad credentials or expired API key
+- `OdooAccessError` -- authenticated but not permitted
+- `OdooValidationError` -- Odoo rejected the values
+- `OdooRecordNotFoundError` -- record does not exist
+- `OdooModuleNotInstalledError` -- namespace used on a DB lacking its module
+- `OdooActionNotAllowedError` -- method outside the class allowlist
 
 All CLI responses are JSON with either `{"success": true, "result": ...}` or `{"error": "...", "type": "..."}`.
 
