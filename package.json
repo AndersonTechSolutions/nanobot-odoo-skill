@@ -1,6 +1,6 @@
 {
   "name": "odoo-erp-connector",
-  "version": "1.0.1",
+  "version": "3.0.0",
   "description": "Odoo 17 ERP integration for nanobot (Sales, CRM, Purchase, Inventory, Projects, HR, Fleet, Manufacturing, To-Do Priority Matrix)",
   "author": "AndersonTechSolutions",
   "license": "MIT",

@@ -6,6 +6,7 @@ Argparse-based CLI that dispatches subcommands to SmartActionHandler
 and TodoMatrixOps methods, outputting JSON results to stdout.
 """
 import argparse
+import inspect
 import json
 import os
 import re
@@ -149,13 +150,24 @@ def _check_permission(client: OdooClient, email: str, model: str, action: str) -
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _get_smart() -> SmartActionHandler:
-    """Create an authenticated SmartActionHandler from env/config."""
-    config_path = os.path.join(SKILL_DIR, "config.json")
-    if not os.path.exists(config_path):
-        _err("Odoo not configured. Copy config.json.template to config.json and fill in credentials.")
-    client = OdooClient.from_env()
-    return SmartActionHandler(client)
+def _get_smart(allow_create: bool = False) -> SmartActionHandler:
+    """Create an authenticated SmartActionHandler from env/config.
+
+    Configuration comes from environment variables *or* config.json, so the
+    presence of config.json is not a precondition — requiring it broke
+    env-only installs (ZeroClaw sets ODOO_* directly). Only report a
+    configuration error when neither source yields credentials.
+    """
+    try:
+        client = OdooClient.from_env()
+    except Exception as exc:
+        _err(
+            f"Odoo not configured: {exc}. Set ODOO_URL / ODOO_DB / "
+            f"ODOO_USERNAME / ODOO_API_KEY, or copy config.json.template to "
+            f"config.json and fill in credentials.",
+            "ConfigurationError",
+        )
+    return SmartActionHandler(client, allow_create=allow_create)
 
 
 def _get_client() -> OdooClient:
@@ -493,7 +505,183 @@ def cmd_delete_record(args):
 
 # ── Dispatch table ───────────────────────────────────────────────────
 
+# ── Generic namespace access (AndersonTech custom modules) ──────────
+#
+# The subcommands above cover the core Odoo workflows with one handler each.
+# That does not scale to the custom modules — repair, RMA, warranty,
+# consignment, helpdesk, messaging, field service, eBay listings, product
+# drafts and ITAD add ~229 methods between them, and hand-writing a
+# subcommand per method would be unmaintainable.
+#
+# Instead these four commands expose the ops classes generically: `call`
+# invokes any method, and `list-ops` / `describe-op` / `list-actions` let an
+# agent discover what exists without carrying the docs in its prompt.
+
+#: Maps a namespace name to its SmartActionHandler attribute.
+#: ``smart`` is the handler itself (the composite smart_* actions).
+OPS_NAMESPACES = {
+    "smart": None,
+    # core Odoo
+    "partners": "partners", "sales": "sales", "invoices": "invoices",
+    "inventory": "inventory", "crm": "crm", "purchase": "purchase",
+    "projects": "projects", "hr": "hr", "calendar": "calendar",
+    "todo_matrix": "todo_matrix",
+    # AndersonTech custom modules
+    "repairs": "repairs", "rmas": "rmas", "warranty": "warranty",
+    "consignment": "consignment", "helpdesk": "helpdesk",
+    "messaging": "messaging", "field_service": "field_service",
+    "ebay": "ebay", "product_drafts": "product_drafts", "itad": "itad",
+}
+
+# Method-name prefixes that mutate data. These require --confirm.
+_WRITE_PREFIXES = (
+    "create", "update", "add", "set", "post", "reply", "assign", "schedule",
+    "reschedule", "apply", "publish", "end_", "mark", "record", "run_action",
+    "run_item_action", "run_claim_action", "run_product_action", "delete",
+    "unlink", "smart_create",
+)
+
+
+def _op_writes(name: str) -> bool:
+    """Whether an ops method name looks like it mutates data."""
+    return name.startswith(_WRITE_PREFIXES)
+
+
+def _resolve_op(smart: SmartActionHandler, target: str):
+    """Resolve ``"namespace.method"`` to a bound callable."""
+    if "." not in target:
+        _err(f"Expected 'namespace.method', got {target!r}. "
+             f"Run `list-ops` to see namespaces.", "BadTarget")
+    ns_name, method = target.split(".", 1)
+    if ns_name not in OPS_NAMESPACES:
+        _err(f"Unknown namespace {ns_name!r}. Available: "
+             f"{', '.join(sorted(OPS_NAMESPACES))}", "BadNamespace")
+    attr = OPS_NAMESPACES[ns_name]
+    obj = smart if attr is None else getattr(smart, attr)
+    if method.startswith("_") or not callable(getattr(obj, method, None)):
+        available = sorted(
+            m for m in dir(obj)
+            if not m.startswith("_") and callable(getattr(obj, m, None))
+        )
+        _err(f"{ns_name!r} has no public method {method!r}. "
+             f"Available: {', '.join(available[:40])}", "BadMethod")
+    return obj, method
+
+
+def cmd_call(args):
+    """Invoke any ops method with JSON keyword arguments."""
+    try:
+        call_args = json.loads(args.args) if args.args else {}
+    except json.JSONDecodeError as exc:
+        _err(f"--args is not valid JSON: {exc}", "BadArguments")
+    if not isinstance(call_args, dict):
+        _err("--args must be a JSON object of keyword arguments.", "BadArguments")
+
+    _, method_name = args.target.split(".", 1) if "." in args.target else ("", "")
+    writes = _op_writes(method_name)
+    if writes and not args.confirm:
+        _err(f"{args.target} modifies data. Re-run with --confirm to execute. "
+             f"Nothing was changed.", "ConfirmationRequired")
+
+    smart = _get_smart(allow_create=args.allow_create)
+    obj, method_name = _resolve_op(smart, args.target)
+    fn = getattr(obj, method_name)
+    try:
+        result = fn(**call_args)
+    except TypeError as exc:
+        try:
+            sig = str(inspect.signature(fn))
+        except (TypeError, ValueError):
+            sig = "(unavailable)"
+        _err(f"Bad arguments for {args.target}: {exc}. "
+             f"Signature: {method_name}{sig}", "BadArguments")
+    _out({"success": True, "target": args.target, "wrote": writes,
+          "result": result})
+
+
+def cmd_list_ops(args):
+    """List ops namespaces, or the methods on one."""
+    smart = _get_smart()
+    if not args.namespace:
+        out = {}
+        for name, attr in sorted(OPS_NAMESPACES.items()):
+            if attr is None:
+                out[name] = {"model": "(composite smart actions)", "available": True}
+                continue
+            obj = getattr(smart, attr)
+            entry = {"model": getattr(obj, "MODEL", "?")}
+            if hasattr(obj, "available"):
+                entry["available"] = obj.available()
+                if not entry["available"]:
+                    entry["requires_module"] = getattr(obj, "MODULE", "?")
+            else:
+                entry["available"] = True
+            out[name] = entry
+        _out({"success": True, "namespaces": out})
+        return
+
+    if args.namespace not in OPS_NAMESPACES:
+        _err(f"Unknown namespace {args.namespace!r}. Available: "
+             f"{', '.join(sorted(OPS_NAMESPACES))}", "BadNamespace")
+    attr = OPS_NAMESPACES[args.namespace]
+    obj = smart if attr is None else getattr(smart, attr)
+    methods = {}
+    for name in sorted(dir(obj)):
+        if name.startswith("_"):
+            continue
+        fn = getattr(obj, name, None)
+        if not callable(fn):
+            continue
+        try:
+            sig = str(inspect.signature(fn))
+        except (TypeError, ValueError):
+            sig = "()"
+        methods[name] = {
+            "signature": f"{name}{sig}",
+            "summary": (inspect.getdoc(fn) or "").split("\n")[0],
+            "writes": _op_writes(name),
+        }
+    _out({"success": True, "namespace": args.namespace, "methods": methods})
+
+
+def cmd_describe_op(args):
+    """Show one ops method's signature and full docstring."""
+    smart = _get_smart()
+    obj, method_name = _resolve_op(smart, args.target)
+    fn = getattr(obj, method_name)
+    try:
+        sig = str(inspect.signature(fn))
+    except (TypeError, ValueError):
+        sig = "()"
+    _out({"success": True, "target": args.target,
+          "signature": f"{method_name}{sig}",
+          "writes": _op_writes(method_name),
+          "doc": inspect.getdoc(fn) or ""})
+
+
+def cmd_list_actions(args):
+    """List the allowlisted Odoo button methods for a namespace."""
+    smart = _get_smart()
+    if args.namespace not in OPS_NAMESPACES:
+        _err(f"Unknown namespace {args.namespace!r}", "BadNamespace")
+    attr = OPS_NAMESPACES[args.namespace]
+    obj = smart if attr is None else getattr(smart, attr)
+    if not hasattr(obj, "ALLOWED_ACTIONS"):
+        _err(f"{args.namespace!r} does not expose Odoo button methods.",
+             "NotApplicable")
+    out = {"model": obj.MODEL, "actions": sorted(obj.ALLOWED_ACTIONS)}
+    for extra in ("ALLOWED_ITEM_ACTIONS", "ALLOWED_CLAIM_ACTIONS",
+                  "ALLOWED_PRODUCT_ACTIONS"):
+        if hasattr(obj, extra):
+            out[extra.lower()] = sorted(getattr(obj, extra))
+    _out({"success": True, "namespace": args.namespace, **out})
+
+
 COMMANDS = {
+    "call": cmd_call,
+    "list-ops": cmd_list_ops,
+    "describe-op": cmd_describe_op,
+    "list-actions": cmd_list_actions,
     "create-quotation": cmd_create_quotation,
     "create-lead": cmd_create_lead,
     "create-todo": cmd_create_todo,
@@ -534,6 +722,24 @@ def build_parser() -> argparse.ArgumentParser:
         description="Odoo ERP CLI — dispatches subcommands to the Odoo connector.",
     )
     subs = parser.add_subparsers(dest="command", required=True)
+
+    # -- generic namespace access (custom modules)
+    p = subs.add_parser("call", help="Invoke <namespace>.<method>")
+    p.add_argument("target", help="e.g. repairs.bench_summary")
+    p.add_argument("--args", help="JSON object of keyword arguments")
+    p.add_argument("--confirm", action="store_true",
+                   help="Authorise a method that modifies data")
+    p.add_argument("--allow-create", dest="allow_create", action="store_true",
+                   help="Permit smart actions to auto-create missing records")
+
+    p = subs.add_parser("list-ops", help="List ops namespaces or their methods")
+    p.add_argument("namespace", nargs="?")
+
+    p = subs.add_parser("describe-op", help="Show one ops method's docs")
+    p.add_argument("target")
+
+    p = subs.add_parser("list-actions", help="List allowlisted Odoo button methods")
+    p.add_argument("namespace")
 
     # -- create-quotation
     p = subs.add_parser("create-quotation", help="Create a sales quotation")

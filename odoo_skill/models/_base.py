@@ -1,0 +1,347 @@
+"""
+Shared base for the AndersonTech custom-module operation classes.
+
+The original twelve ops classes (partner, sale_order, ...) each stand alone.
+The custom-module classes added later share enough behaviour — module
+availability guards, gated action dispatch, consistent summaries — that
+duplicating it eleven times would be worse than a small base.
+
+Two rules this base enforces, both of which matter for unattended agents:
+
+1. **Module guards.** Not every AndersonTech module is installed on every
+   database (staging vs prod vs a fresh dev DB). An ops class declares
+   ``REQUIRES_MODEL``; calling into it on a database where that model is
+   absent raises a clear :class:`OdooModuleNotInstalledError` naming the
+   module, instead of a cryptic XML-RPC fault.
+
+2. **Gated action dispatch.** ``run_action`` will only invoke a method
+   listed in the class's ``ALLOWED_ACTIONS``. Odoo's ``execute_kw`` will
+   happily call *any* public method on a model — including ``unlink`` and
+   anything a future module adds. An agent that can be talked into calling
+   an arbitrary method name is a liability, so the allowlist is explicit
+   and per-class.
+"""
+
+import logging
+from typing import Any, Callable, Iterable, Optional
+
+from ..client import OdooClient
+from ..errors import OdooError, OdooRecordNotFoundError
+
+logger = logging.getLogger("odoo_skill")
+
+
+class OdooModuleNotInstalledError(OdooError):
+    """Raised when an ops class is used against a database lacking its module."""
+
+
+class OdooActionNotAllowedError(OdooError):
+    """Raised when a caller asks for a method outside the class allowlist."""
+
+
+class BaseOps:
+    """Common behaviour for custom-module operation classes.
+
+    Subclasses set :attr:`MODEL`, :attr:`MODULE`, :attr:`LIST_FIELDS`,
+    :attr:`DETAIL_FIELDS`, and :attr:`ALLOWED_ACTIONS`.
+    """
+
+    #: Primary Odoo model this class operates on.
+    MODEL: str = ""
+    #: Technical name of the Odoo module providing :attr:`MODEL` (for errors).
+    MODULE: str = ""
+    #: Fields returned by :meth:`search` / list views.
+    LIST_FIELDS: list[str] = ["id", "display_name"]
+    #: Fields returned by :meth:`get` / detail views. Falls back to LIST_FIELDS.
+    DETAIL_FIELDS: list[str] = []
+    #: Method names :meth:`run_action` is permitted to invoke.
+    ALLOWED_ACTIONS: frozenset[str] = frozenset()
+    #: Default ordering for searches.
+    ORDER: str = ""
+
+    def __init__(self, client: OdooClient) -> None:
+        self.client = client
+        self._available: Optional[bool] = None
+
+    # ── Availability ─────────────────────────────────────────────────
+
+    def available(self) -> bool:
+        """Return ``True`` if :attr:`MODEL` exists on this database.
+
+        Cached per instance — the answer cannot change within a session.
+        """
+        if self._available is None:
+            try:
+                self.client.fields_get(self.MODEL, attributes=["type"])
+                self._available = True
+            except OdooError:
+                self._available = False
+                logger.info(
+                    "Model %s unavailable (module %s not installed)",
+                    self.MODEL, self.MODULE or "?",
+                )
+        return self._available
+
+    def _require(self) -> None:
+        """Raise if the backing module is not installed."""
+        if not self.available():
+            raise OdooModuleNotInstalledError(
+                f"Model '{self.MODEL}' is not available on this database. "
+                f"Install the '{self.MODULE or 'providing'}' module first."
+            )
+
+    # ── Read ─────────────────────────────────────────────────────────
+
+    def _fields(self, detail: bool = False) -> list[str]:
+        if detail:
+            return self.DETAIL_FIELDS or self.LIST_FIELDS
+        return self.LIST_FIELDS
+
+    def search(
+        self,
+        domain: Optional[list] = None,
+        limit: int = 50,
+        offset: int = 0,
+        order: Optional[str] = None,
+        fields: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Search records, returning list-view fields."""
+        self._require()
+        return self.client.search_read(
+            self.MODEL,
+            domain or [],
+            fields=fields or self._fields(),
+            limit=limit,
+            offset=offset,
+            order=order if order is not None else self.ORDER,
+        )
+
+    def get(self, rec_id: int, fields: Optional[list[str]] = None) -> dict:
+        """Read one record with detail fields.
+
+        Raises:
+            OdooRecordNotFoundError: If *rec_id* does not exist.
+        """
+        self._require()
+        rows = self.client.read(
+            self.MODEL, [rec_id], fields=fields or self._fields(detail=True)
+        )
+        if not rows:
+            raise OdooRecordNotFoundError(
+                f"No {self.MODEL} record with id {rec_id}"
+            )
+        return rows[0]
+
+    def count(self, domain: Optional[list] = None) -> int:
+        """Count records matching *domain*."""
+        self._require()
+        return self.client.search_count(self.MODEL, domain or [])
+
+    def find(self, query: str, field: str = "name", limit: int = 10) -> list[dict]:
+        """Case-insensitive lookup on *field*."""
+        return self.search([[field, "ilike", query]], limit=limit)
+
+    # ── Non-stored computed fields ───────────────────────────────────
+    #
+    # Several of the custom modules expose useful flags as *non-stored*
+    # computed fields — repair.order.is_overdue, rma.order.can_execute_resolutions,
+    # tasks.itad_can_dispatch, and others. These have no database column, so
+    # they cannot appear in a domain.
+    #
+    # The failure mode is nasty: rather than raising, Odoo silently drops the
+    # clause and returns the *unfiltered* set. A caller asking for "overdue
+    # repairs" gets every open repair back and has no way to tell. So any
+    # filter on such a field runs client-side, over a bounded scan.
+
+    #: How many rows to pull per requested row when filtering client-side.
+    COMPUTED_SCAN_FACTOR: int = 10
+    #: Hard ceiling on a client-side scan, to bound one RPC round-trip.
+    COMPUTED_SCAN_CAP: int = 2000
+
+    def _scan_window(self, limit: int) -> int:
+        """How many rows to fetch when a predicate must run client-side."""
+        return min(max(limit * self.COMPUTED_SCAN_FACTOR, 200), self.COMPUTED_SCAN_CAP)
+
+    def search_computed(
+        self,
+        stored_domain: Optional[list],
+        predicate: "Callable[[dict], bool]",
+        limit: int = 50,
+        order: Optional[str] = None,
+        fields: Optional[list[str]] = None,
+        extra_fields: Optional[Iterable[str]] = None,
+    ) -> list[dict]:
+        """Search on stored fields, then apply *predicate* in Python.
+
+        Args:
+            stored_domain: Domain over stored fields only — narrows the scan.
+            predicate: Called per row; return ``True`` to keep it.
+            limit: Maximum rows to return after filtering.
+            order: Sort clause applied server-side, before filtering.
+            fields: Fields to return (defaults to the class list fields).
+            extra_fields: Fields the predicate needs that are not in *fields*.
+
+        Returns:
+            At most *limit* matching rows. When the scan window fills up, a
+            warning is logged — the result is then a prefix, not the whole
+            truth, and the caller should narrow *stored_domain*.
+        """
+        self._require()
+        want = list(fields or self._fields())
+        for f in extra_fields or []:
+            if f not in want:
+                want.append(f)
+
+        window = self._scan_window(limit)
+        rows = self.client.search_read(
+            self.MODEL, stored_domain or [], fields=want,
+            limit=window, order=order if order is not None else self.ORDER,
+        )
+        if len(rows) >= window:
+            logger.warning(
+                "%s: client-side filter scanned the full %d-row window; "
+                "results may be incomplete. Narrow the stored domain.",
+                self.MODEL, window,
+            )
+        return [r for r in rows if predicate(r)][:limit]
+
+    def count_computed(
+        self,
+        stored_domain: Optional[list],
+        predicate: "Callable[[dict], bool]",
+        extra_fields: Optional[Iterable[str]] = None,
+    ) -> int:
+        """Count rows matching a client-side *predicate*.
+
+        Bounded by :attr:`COMPUTED_SCAN_CAP`. The count is exact only when
+        the stored domain selects fewer rows than the cap; otherwise it is a
+        floor and a warning is logged.
+        """
+        self._require()
+        want = ["id"] + [f for f in (extra_fields or []) if f != "id"]
+        rows = self.client.search_read(
+            self.MODEL, stored_domain or [], fields=want,
+            limit=self.COMPUTED_SCAN_CAP,
+        )
+        if len(rows) >= self.COMPUTED_SCAN_CAP:
+            logger.warning(
+                "%s: count_computed hit the %d-row cap; the returned count is "
+                "a lower bound.", self.MODEL, self.COMPUTED_SCAN_CAP,
+            )
+        return sum(1 for r in rows if predicate(r))
+
+    # ── Write ────────────────────────────────────────────────────────
+
+    def create(self, values: dict) -> dict:
+        """Create a record and return it in detail form."""
+        self._require()
+        rec_id = self.client.create(self.MODEL, values)
+        logger.info("Created %s id=%s", self.MODEL, rec_id)
+        return self.get(rec_id)
+
+    def update(self, rec_id: int, values: dict) -> dict:
+        """Write *values* to a record and return the updated detail form."""
+        self._require()
+        self.client.write(self.MODEL, rec_id, values)
+        logger.info("Updated %s id=%s fields=%s", self.MODEL, rec_id, list(values))
+        return self.get(rec_id)
+
+    # ── Gated action dispatch ────────────────────────────────────────
+
+    def run_action(self, rec_id: int, method: str, **kwargs: Any) -> dict:
+        """Invoke an allowlisted button method on a record.
+
+        Odoo button methods return either ``True``/``False`` or an action
+        dict (to open a view/wizard). Both are wrapped in a consistent
+        envelope alongside the record's post-action state, so a caller can
+        see what actually changed.
+
+        Args:
+            rec_id: Record to act on.
+            method: Method name; must be in :attr:`ALLOWED_ACTIONS`.
+            **kwargs: Forwarded to the Odoo method.
+
+        Raises:
+            OdooActionNotAllowedError: If *method* is not allowlisted.
+        """
+        self._require()
+        if method not in self.ALLOWED_ACTIONS:
+            raise OdooActionNotAllowedError(
+                f"Method '{method}' is not permitted on {self.MODEL}. "
+                f"Allowed: {', '.join(sorted(self.ALLOWED_ACTIONS)) or '(none)'}"
+            )
+        raw = self.client.execute(self.MODEL, method, [rec_id], **kwargs)
+        record = self.get(rec_id)
+        return {
+            "model": self.MODEL,
+            "id": rec_id,
+            "method": method,
+            "returned": raw if not isinstance(raw, dict) else _describe_action(raw),
+            "record": record,
+        }
+
+    def actions(self) -> list[str]:
+        """List the methods :meth:`run_action` will accept."""
+        return sorted(self.ALLOWED_ACTIONS)
+
+    # ── Helpers for subclasses ───────────────────────────────────────
+
+    def _resolve_one(
+        self,
+        query: Any,
+        model: str,
+        field: str = "name",
+        extra_domain: Optional[list] = None,
+    ) -> Optional[dict]:
+        """Resolve *query* (an id or a name) to a single ``{id, name}`` dict.
+
+        Returns ``None`` when nothing matches. Ambiguity resolves to the
+        first match by Odoo's default order — callers that care should use
+        :meth:`_resolve_candidates` instead.
+        """
+        if isinstance(query, int):
+            rows = self.client.read(model, [query], fields=["display_name"])
+            return {"id": query, "name": rows[0]["display_name"]} if rows else None
+        domain = list(extra_domain or []) + [[field, "ilike", str(query)]]
+        rows = self.client.search_read(
+            model, domain, fields=["display_name"], limit=1
+        )
+        return {"id": rows[0]["id"], "name": rows[0]["display_name"]} if rows else None
+
+    def _resolve_candidates(
+        self,
+        query: str,
+        model: str,
+        field: str = "name",
+        limit: int = 5,
+        extra_domain: Optional[list] = None,
+    ) -> list[dict]:
+        """Return near-matches for *query*, for 'did you mean' responses."""
+        domain = list(extra_domain or []) + [[field, "ilike", str(query)]]
+        rows = self.client.search_read(
+            model, domain, fields=["display_name"], limit=limit
+        )
+        return [{"id": r["id"], "name": r["display_name"]} for r in rows]
+
+
+def _describe_action(action: dict) -> dict:
+    """Compress an Odoo action dict to the bits a chat agent can use."""
+    return {
+        "type": action.get("type"),
+        "res_model": action.get("res_model"),
+        "res_id": action.get("res_id"),
+        "name": action.get("name"),
+        "view_mode": action.get("view_mode"),
+        "target": action.get("target"),
+        "tag": action.get("tag"),
+    }
+
+
+def summarize(rows: Iterable[dict], label: str, empty: str = "none") -> str:
+    """Build a one-line human summary of a result set."""
+    rows = list(rows)
+    if not rows:
+        return f"No {label} found ({empty})."
+    names = [str(r.get("display_name") or r.get("name") or r.get("id")) for r in rows[:5]]
+    more = f" (+{len(rows) - 5} more)" if len(rows) > 5 else ""
+    return f"{len(rows)} {label}: " + ", ".join(names) + more

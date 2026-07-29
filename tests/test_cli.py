@@ -177,6 +177,7 @@ class TestCLIDispatch:
         args = argparse.Namespace(
             task="Review", employee="Ian", urgent=True,
             important=True, deadline="2026-04-15", description=None,
+            reminder=None, category=None, location=None,
         )
         with patch("odoo._get_smart", return_value=mock_smart):
             cli_module.cmd_create_todo(args)
@@ -187,6 +188,7 @@ class TestCLIDispatch:
             task_name="Review", employee_name="Ian",
             is_urgent=True, is_important=True,
             deadline="2026-04-15", description=None,
+            location_name=None,
         )
 
     def test_cmd_complete_task(self, capsys):

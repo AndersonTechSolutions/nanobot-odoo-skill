@@ -12,7 +12,22 @@ from .manufacturing import ManufacturingOps
 from .calendar_ops import CalendarOps
 from .fleet import FleetOps
 from .ecommerce import EcommerceOps
+from ._base import (
+    BaseOps,
+    OdooActionNotAllowedError,
+    OdooModuleNotInstalledError,
+)
 from .todo_matrix import TodoMatrixOps
+from .repair import RepairOps
+from .rma import RMAOps
+from .warranty import WarrantyOps
+from .consignment import ConsignmentOps
+from .helpdesk import HelpdeskOps
+from .messaging import MessagingOps
+from .field_service import FieldServiceOps
+from .ebay_listing import EbayListingOps
+from .product_gui import ProductGuiOps
+from .itad import ITADOps
 
 __all__ = [
     "PartnerOps",
@@ -28,4 +43,17 @@ __all__ = [
     "FleetOps",
     "EcommerceOps",
     "TodoMatrixOps",
+    "BaseOps",
+    "OdooModuleNotInstalledError",
+    "OdooActionNotAllowedError",
+    "RepairOps",
+    "RMAOps",
+    "WarrantyOps",
+    "ConsignmentOps",
+    "HelpdeskOps",
+    "MessagingOps",
+    "FieldServiceOps",
+    "EbayListingOps",
+    "ProductGuiOps",
+    "ITADOps",
 ]

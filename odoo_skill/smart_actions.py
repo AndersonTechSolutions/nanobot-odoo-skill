@@ -13,6 +13,7 @@ when necessary, and provide clear feedback about what was found
 vs. what was created.
 """
 
+import functools
 import json
 import logging
 import re
@@ -31,6 +32,16 @@ from .models.project import ProjectOps
 from .models.hr import HROps
 from .models.calendar_ops import CalendarOps
 from .models.todo_matrix import TodoMatrixOps
+from .models.repair import RepairOps
+from .models.rma import RMAOps
+from .models.warranty import WarrantyOps
+from .models.consignment import ConsignmentOps
+from .models.helpdesk import HelpdeskOps
+from .models.messaging import MessagingOps
+from .models.field_service import FieldServiceOps
+from .models.ebay_listing import EbayListingOps
+from .models.product_gui import ProductGuiOps
+from .models.itad import ITADOps
 
 logger = logging.getLogger("odoo_skill")
 
@@ -118,6 +129,68 @@ def _save_learned_aliases(aliases: dict[str, str]) -> None:
     tmp.replace(_LOCATION_VOCAB_PATH)
 
 
+class MissingDependency(Exception):
+    """Raised internally when a lookup misses and auto-creation is disabled.
+
+    Carries enough context for the caller to decide what to do: what kind of
+    record was wanted, what was searched for, and what nearly matched.
+    Callers of the public ``smart_*`` methods never see this — it is caught
+    and converted into a ``needs_confirmation`` result dict.
+    """
+
+    def __init__(self, kind: str, query: str, near_matches: list[dict]) -> None:
+        self.kind = kind
+        self.query = query
+        self.near_matches = near_matches
+        super().__init__(f"No {kind} matching {query!r}")
+
+    def as_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "query": self.query,
+            "near_matches": self.near_matches,
+        }
+
+
+def _needs_confirmation(exc: MissingDependency) -> dict:
+    """Build the standard 'I did not create anything' response."""
+    near = exc.near_matches
+    hint = (
+        " Did you mean: "
+        + ", ".join(f"{m['name']} (id {m['id']})" for m in near[:5])
+        + "?"
+        if near else
+        " No near matches found."
+    )
+    return {
+        "status": "needs_confirmation",
+        "summary": (
+            f"No {exc.kind} matching {exc.query!r}.{hint} "
+            f"Nothing was created — pass allow_create=True to create it."
+        ),
+        "missing": [exc.as_dict()],
+        "created_anything": False,
+    }
+
+
+def _gated(method):
+    """Wrap a ``smart_*`` method so a missing dependency returns, not raises.
+
+    Auto-creation is off by default (see :class:`SmartActionHandler`), which
+    means any of these methods can hit a dead end mid-workflow. Returning a
+    structured ``needs_confirmation`` dict is far more useful to a chat agent
+    than an exception, and keeps the "nothing was written" guarantee explicit.
+    """
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except MissingDependency as exc:
+            logger.info("Blocked %s: %s", method.__name__, exc)
+            return _needs_confirmation(exc)
+    return wrapper
+
+
 class SmartActionHandler:
     """Handles fuzzy, natural-language-style Odoo operations.
 
@@ -136,8 +209,9 @@ class SmartActionHandler:
         )
     """
 
-    def __init__(self, client: OdooClient) -> None:
+    def __init__(self, client: OdooClient, allow_create: bool = False) -> None:
         self.client = client
+        self.allow_create = allow_create
         self.partners = PartnerOps(client)
         self.sales = SaleOrderOps(client)
         self.invoices = InvoiceOps(client)
@@ -148,6 +222,20 @@ class SmartActionHandler:
         self.hr = HROps(client)
         self.calendar = CalendarOps(client)
         self.todo_matrix = TodoMatrixOps(client)
+
+        # AndersonTech custom modules. Each only probes its model on first
+        # use, so attaching all of them costs nothing on a database where
+        # a module is absent.
+        self.repairs = RepairOps(client)
+        self.rmas = RMAOps(client)
+        self.warranty = WarrantyOps(client)
+        self.consignment = ConsignmentOps(client)
+        self.helpdesk = HelpdeskOps(client)
+        self.messaging = MessagingOps(client)
+        self.field_service = FieldServiceOps(client)
+        self.ebay = EbayListingOps(client)
+        self.product_drafts = ProductGuiOps(client)
+        self.itad = ITADOps(client)
 
         # Learned aliases take precedence over baked-in ones so Ian can
         # override a bad built-in without editing code.
@@ -375,6 +463,7 @@ class SmartActionHandler:
         name: str,
         is_company: bool = True,
         supplier: bool = False,
+        allow_create: Optional[bool] = None,
         **defaults: Any,
     ) -> dict:
         """Search for a partner by name. Create if not found.
@@ -412,6 +501,11 @@ class SmartActionHandler:
                 "matched": results,
             }
 
+        if not self._may_create(allow_create):
+            raise MissingDependency(
+                "customer", name, self._near("res.partner", name)
+            )
+
         # Not found — create
         create_vals: dict[str, Any] = {
             "name": name,
@@ -438,6 +532,7 @@ class SmartActionHandler:
     def find_or_create_product(
         self,
         name: str,
+        allow_create: Optional[bool] = None,
         **defaults: Any,
     ) -> dict:
         """Search for a product by name or internal reference. Create if not found.
@@ -470,6 +565,12 @@ class SmartActionHandler:
                 "matched": results,
             }
 
+        if not self._may_create(allow_create):
+            raise MissingDependency(
+                "product", name,
+                self._near("product.product", name, extra_field="default_code"),
+            )
+
         # Not found — create a basic product
         create_vals: dict[str, Any] = {
             "name": name,
@@ -491,7 +592,9 @@ class SmartActionHandler:
             "matched": [],
         }
 
-    def _find_or_create_project(self, name: str, **defaults: Any) -> dict:
+    def _find_or_create_project(
+        self, name: str, allow_create: Optional[bool] = None, **defaults: Any
+    ) -> dict:
         """Search for a project by name. Create if not found.
 
         Args:
@@ -513,16 +616,57 @@ class SmartActionHandler:
             best = exact[0] if exact else results[0]
             return {"project": best, "created": False}
 
+        if not self._may_create(allow_create):
+            raise MissingDependency(
+                "project", name, self._near("project.project", name)
+            )
+
         project = self.projects.create_project(name, **defaults)
         return {"project": project, "created": True}
 
+    # ── Auto-creation policy ─────────────────────────────────────────
+
+    def _may_create(self, allow_create: Optional[bool]) -> bool:
+        """Resolve the effective auto-creation policy for one call.
+
+        A per-call ``allow_create`` always wins; otherwise the handler's
+        construction-time default applies.
+        """
+        return self.allow_create if allow_create is None else bool(allow_create)
+
+    def _near(
+        self, model: str, query: str, extra_field: Optional[str] = None, limit: int = 5
+    ) -> list[dict]:
+        """Find loose near-matches for a failed lookup, for 'did you mean'.
+
+        The strict search already missed, so this widens the net: it drops
+        the ``active`` filter and, when *extra_field* is given, also matches
+        on that field. Any error here is swallowed — a suggestion list is a
+        nicety, and failing to build one must not mask the original miss.
+        """
+        try:
+            domain: list = [[
+                "name", "ilike", query.split()[0] if query.split() else query
+            ]]
+            if extra_field:
+                domain = ["|", domain[0], [extra_field, "ilike", query]]
+            rows = self.client.search_read(
+                model, domain, fields=["id", "name"], limit=limit
+            )
+            return [{"id": r["id"], "name": r["name"]} for r in rows]
+        except Exception as exc:  # noqa: BLE001 - suggestions are best-effort
+            logger.debug("Near-match lookup failed for %s %r: %s", model, query, exc)
+            return []
+
     # ── Smart composite actions ──────────────────────────────────────
 
+    @_gated
     def smart_create_quotation(
         self,
         customer_name: str,
         product_lines: list[dict],
         notes: Optional[str] = None,
+        allow_create: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Create a quotation from names (not IDs).
@@ -552,7 +696,7 @@ class SmartActionHandler:
             )
         """
         # Step 1: Resolve customer
-        customer_result = self.find_or_create_partner(customer_name)
+        customer_result = self.find_or_create_partner(customer_name, allow_create=allow_create)
         partner_id = customer_result["partner"]["id"]
 
         # Step 2: Resolve products and build order lines
@@ -570,7 +714,7 @@ class SmartActionHandler:
             if "price_unit" in line:
                 price_default["list_price"] = line["price_unit"]
 
-            product_result = self.find_or_create_product(product_name, **price_default)
+            product_result = self.find_or_create_product(product_name, allow_create=allow_create, **price_default)
             product = product_result["product"]
 
             order_line: dict[str, Any] = {
@@ -607,11 +751,13 @@ class SmartActionHandler:
             ),
         }
 
+    @_gated
     def smart_create_invoice(
         self,
         customer_name: str,
         lines: list[dict],
         invoice_date: Optional[str] = None,
+        allow_create: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Create an invoice from names (not IDs).
@@ -627,7 +773,7 @@ class SmartActionHandler:
             Dict with ``invoice``, ``customer`` info, and ``products`` info.
         """
         # Resolve customer
-        customer_result = self.find_or_create_partner(customer_name)
+        customer_result = self.find_or_create_partner(customer_name, allow_create=allow_create)
         partner_id = customer_result["partner"]["id"]
 
         # Resolve products in lines (if product names are provided)
@@ -642,7 +788,7 @@ class SmartActionHandler:
 
             product_name = line.get("product_name", line.get("product", ""))
             if product_name:
-                product_result = self.find_or_create_product(product_name)
+                product_result = self.find_or_create_product(product_name, allow_create=allow_create)
                 il["product_id"] = product_result["product"]["id"]
                 products_info.append({
                     "product": product_result["product"],
@@ -671,6 +817,7 @@ class SmartActionHandler:
             ),
         }
 
+    @_gated
     def smart_create_lead(
         self,
         name: str,
@@ -678,6 +825,7 @@ class SmartActionHandler:
         email: Optional[str] = None,
         phone: Optional[str] = None,
         expected_revenue: Optional[float] = None,
+        allow_create: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Create a CRM lead with optional partner linking.
@@ -702,7 +850,7 @@ class SmartActionHandler:
         partner_info = None
         if contact_name:
             partner_result = self.find_or_create_partner(
-                contact_name, is_company=False,
+                contact_name, is_company=False, allow_create=allow_create,
             )
             extra["partner_id"] = partner_result["partner"]["id"]
             partner_info = partner_result
@@ -722,11 +870,13 @@ class SmartActionHandler:
             "summary": f"Lead '{name}' created (id={lead.get('id', '?')})",
         }
 
+    @_gated
     def smart_create_purchase(
         self,
         vendor_name: str,
         product_lines: list[dict],
         date_planned: Optional[str] = None,
+        allow_create: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Create a purchase order from names (not IDs).
@@ -759,7 +909,7 @@ class SmartActionHandler:
         for line in product_lines:
             product_name = line.get("name", line.get("product_name", ""))
             if product_name:
-                product_result = self.find_or_create_product(product_name)
+                product_result = self.find_or_create_product(product_name, allow_create=allow_create)
                 product = product_result["product"]
                 products_info.append({
                     "product": product,
@@ -792,6 +942,7 @@ class SmartActionHandler:
             ),
         }
 
+    @_gated
     def smart_create_task(
         self,
         project_name: str,
@@ -799,6 +950,7 @@ class SmartActionHandler:
         description: Optional[str] = None,
         date_deadline: Optional[str] = None,
         assignee_name: Optional[str] = None,
+        allow_create: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Create a task in a project, resolving project by name.
@@ -815,7 +967,7 @@ class SmartActionHandler:
             Dict with ``task``, ``project`` info, and optionally ``assignee``.
         """
         # Resolve project
-        project_result = self._find_or_create_project(project_name)
+        project_result = self._find_or_create_project(project_name, allow_create=allow_create)
         project_id = project_result["project"]["id"]
 
         # Resolve assignee if provided
@@ -851,6 +1003,7 @@ class SmartActionHandler:
             ),
         }
 
+    @_gated
     def smart_create_employee(
         self,
         name: str,
@@ -858,6 +1011,7 @@ class SmartActionHandler:
         department_name: Optional[str] = None,
         work_email: Optional[str] = None,
         work_phone: Optional[str] = None,
+        allow_create: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Create an employee, resolving department by name.
@@ -902,10 +1056,15 @@ class SmartActionHandler:
             if depts:
                 department_id = depts[0]["id"]
                 department_info = {"department": depts[0], "created": False}
-            else:
+            elif self._may_create(allow_create):
                 dept = self.hr.create_department(department_name)
                 department_id = dept["id"]
                 department_info = {"department": dept, "created": True}
+            else:
+                raise MissingDependency(
+                    "department", department_name,
+                    self._near("hr.department", department_name),
+                )
 
         employee = self.hr.create_employee(
             name=name,
@@ -923,6 +1082,7 @@ class SmartActionHandler:
             "summary": f"Employee '{name}' created (id={employee.get('id', '?')})",
         }
 
+    @_gated
     def smart_create_event(
         self,
         name: str,
@@ -930,6 +1090,7 @@ class SmartActionHandler:
         end: Optional[str] = None,
         location: Optional[str] = None,
         attendee_names: Optional[list[str]] = None,
+        allow_create: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Create a calendar event, resolving attendees by name.
@@ -951,7 +1112,7 @@ class SmartActionHandler:
         attendees_info = []
         if attendee_names:
             for att_name in attendee_names:
-                result = self.find_or_create_partner(att_name, is_company=False)
+                result = self.find_or_create_partner(att_name, is_company=False, allow_create=allow_create)
                 partner_ids.append(result["partner"]["id"])
                 attendees_info.append(result)
 
@@ -979,6 +1140,7 @@ class SmartActionHandler:
 
     # ── To-Do Priority Matrix smart actions ───────────────────────────
 
+    @_gated
     def smart_create_todo(
         self,
         task_name: str,

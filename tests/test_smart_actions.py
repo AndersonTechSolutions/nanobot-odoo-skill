@@ -28,7 +28,7 @@ class TestFindOrCreatePartner:
             [{"id": 20, "name": "NewCo", "email": "", "phone": "",
               "is_company": True}],  # read
         ]
-        result = smart.find_or_create_partner("NewCo")
+        result = smart.find_or_create_partner("NewCo", allow_create=True)
         assert result["created"] is True
         assert result["partner"]["id"] == 20
         assert result["matched"] == []
@@ -78,7 +78,7 @@ class TestFindOrCreateProduct:
             [{"id": 200, "name": "Gizmo", "default_code": False,
               "list_price": 0.0, "type": "consu"}],  # read
         ]
-        result = smart.find_or_create_product("Gizmo")
+        result = smart.find_or_create_product("Gizmo", allow_create=True)
         assert result["created"] is True
         assert result["product"]["id"] == 200
 
@@ -89,7 +89,7 @@ class TestFindOrCreateProduct:
             [{"id": 201, "name": "Thing", "default_code": False,
               "list_price": 15.0, "type": "consu"}],  # read
         ]
-        result = smart.find_or_create_product("Thing", list_price=15.0)
+        result = smart.find_or_create_product("Thing", list_price=15.0, allow_create=True)
         assert result["created"] is True
         # Verify create was called with the list_price default
         create_call = mock_client._models.execute_kw.call_args_list[1]
@@ -144,6 +144,7 @@ class TestSmartCreateQuotation:
             result = smart.smart_create_quotation(
                 customer_name="Rocky",
                 product_lines=[{"name": "Rock", "quantity": 5}],
+                allow_create=True,
             )
 
         assert result["customer"]["created"] is True

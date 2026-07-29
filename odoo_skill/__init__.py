@@ -17,7 +17,7 @@ Usage::
     )
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 from .client import OdooClient
 from .config import OdooConfig, load_config
@@ -43,6 +43,19 @@ from .models import (
     FleetOps,
     EcommerceOps,
     TodoMatrixOps,
+    BaseOps,
+    OdooModuleNotInstalledError,
+    OdooActionNotAllowedError,
+    RepairOps,
+    RMAOps,
+    WarrantyOps,
+    ConsignmentOps,
+    HelpdeskOps,
+    MessagingOps,
+    FieldServiceOps,
+    EbayListingOps,
+    ProductGuiOps,
+    ITADOps,
 )
 from .smart_actions import SmartActionHandler
 from .sync import OdooChangePoller, OdooWebhookServer
@@ -73,6 +86,19 @@ __all__ = [
     "FleetOps",
     "EcommerceOps",
     "TodoMatrixOps",
+    "BaseOps",
+    "OdooModuleNotInstalledError",
+    "OdooActionNotAllowedError",
+    "RepairOps",
+    "RMAOps",
+    "WarrantyOps",
+    "ConsignmentOps",
+    "HelpdeskOps",
+    "MessagingOps",
+    "FieldServiceOps",
+    "EbayListingOps",
+    "ProductGuiOps",
+    "ITADOps",
     # Smart Actions
     "SmartActionHandler",
     # Sync
