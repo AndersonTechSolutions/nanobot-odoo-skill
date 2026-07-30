@@ -70,6 +70,25 @@ class TestActionAllowlist:
         assert out["method"] == "action_go"
         assert out["record"]["id"] == 1
 
+    def test_dispatch_sends_the_id_as_a_record_list(self, dummy, mock_client):
+        """Button methods are record methods — the id goes in a leading list.
+
+        The mirror of the ``get_workload_data`` bug: model-level methods take
+        no ids list, record methods require one. Asserting only the return
+        shape leaves the argument vector unchecked, which is how that bug
+        survived a passing suite.
+        """
+        mock_client._models.execute_kw.side_effect = [
+            True,
+            [{"id": 7, "name": "x", "flag": False}],
+        ]
+        dummy.run_action(7, "action_go")
+
+        # execute_kw(db, uid, key, model, method, args_list, kwargs_dict)
+        call = mock_client._models.execute_kw.call_args_list[0][0]
+        assert call[4] == "action_go"
+        assert call[5] == [[7]], f"expected a leading ids list, got {call[5]!r}"
+
     def test_actions_lists_the_allowlist(self, dummy):
         assert dummy.actions() == ["action_go"]
 
