@@ -376,10 +376,12 @@ class TodoMatrixOps:
         Returns:
             Dict with ``team_totals`` and ``employees`` list.
         """
-        result = self.client.execute(
-            self.WORKLOAD_MODEL, "get_workload_data", [],
-        )
-        return result
+        # ``get_workload_data`` is decorated ``@api.model``, so Odoo does not
+        # strip a leading ids list off the argument vector — it forwards every
+        # positional straight to the method. Passing ``[]`` here therefore
+        # arrives as a real argument and raises "takes 1 positional argument
+        # but 2 were given". Model-level methods take no positionals at all.
+        return self.client.execute(self.WORKLOAD_MODEL, "get_workload_data")
 
     # ── Checklist ─────────────────────────────────────────────────────
 

@@ -325,3 +325,23 @@ class TestSmartGetTeamWorkload:
         assert "3 members" in result["summary"]
         assert "15 active" in result["summary"]
         assert "2 overdue" in result["summary"]
+
+    def test_sends_no_positional_args_over_the_wire(self, smart, mock_client):
+        """``get_workload_data`` is ``@api.model`` — it takes no positionals.
+
+        Odoo only strips a leading ids list for record methods; for a
+        model-level method every positional is forwarded verbatim. Passing
+        ``[]`` used to arrive as a real argument and raised "takes 1
+        positional argument but 2 were given" against live Odoo, which the
+        mocked-method test above cannot catch.
+        """
+        mock_client._models.execute_kw.return_value = {
+            "team_totals": {}, "employees": [],
+        }
+        smart.todo_matrix.get_team_workload()
+
+        # execute_kw(db, uid, key, model, method, args_list, kwargs_dict)
+        call = mock_client._models.execute_kw.call_args[0]
+        assert call[3] == "employee.todo.workload"
+        assert call[4] == "get_workload_data"
+        assert call[5] == [], f"expected no positional args, got {call[5]!r}"
