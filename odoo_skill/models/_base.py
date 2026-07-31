@@ -147,10 +147,12 @@ class BaseOps:
     # computed fields — repair.order.is_overdue, rma.order.can_execute_resolutions,
     # tasks.itad_can_dispatch, and others.
     #
-    # The failure mode is nasty: rather than raising, Odoo silently drops the
-    # clause and returns the *unfiltered* set. A caller asking for "overdue
-    # repairs" gets every open repair back and has no way to tell. So any
-    # filter on such a field runs client-side, over a bounded scan.
+    # The failure mode is nasty: rather than raising, Odoo drops the clause
+    # and returns the *unfiltered* set. A caller asking for "overdue repairs"
+    # gets every open repair back with no indication anything went wrong — it
+    # logs an error with a traceback server-side, but nothing reaches the RPC
+    # caller. So any filter on such a field runs client-side, over a bounded
+    # scan.
     #
     # IMPORTANT — the discriminator is ``searchable``, not ``store``. A
     # non-stored field is still searchable when it is ``related=`` to a stored
@@ -304,7 +306,7 @@ class BaseOps:
         """List the methods :meth:`run_action` will accept."""
         return sorted(self.ALLOWED_ACTIONS)
 
-    def call_model(self, method: str, *args: Any, **kwargs: Any) -> Any:
+    def _call_model(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Call an ``@api.model`` (model-level) method on :attr:`MODEL`.
 
         The counterpart to :meth:`run_action`, and the distinction is not

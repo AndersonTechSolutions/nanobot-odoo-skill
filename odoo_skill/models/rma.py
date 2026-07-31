@@ -53,6 +53,9 @@ RESOLUTIONS = ["refund", "replace", "replace_advance", "replace_no_return",
 #: Where the RMA originated.
 CHANNELS = ["direct", "ebay", "helpdesk"]
 
+#: States in which an RMA is closed and needs no further action.
+CLOSED_STATES = ["done", "rejected", "cancelled"]
+
 
 class RMAOps(BaseOps):
     """Workflow operations on ``rma.order``."""
@@ -140,8 +143,21 @@ class RMAOps(BaseOps):
         ``return_method == 'advance_replacement'`` drops genuine hits: on
         staging the one overdue RMA carries ``return_method='ship'``, and no
         record uses ``advance_replacement`` at all.
+
+        Closed RMAs are excluded. ``awaiting_advance_return`` is computed from
+        the *line* only, so it survives ``action_cancel`` — which changes
+        ``state`` and nothing else. A cancelled RMA would otherwise report as
+        overdue forever, and dispatching an agent to chase it is wrong.
+
+        Note this is narrower than the module's own board filter, which is a
+        bare ``[("advance_return_overdue", "=", True)]`` with no state scope,
+        so this count can read lower than the Odoo UI's.
         """
-        return self.search([["advance_return_overdue", "=", True]], limit=limit)
+        return self.search(
+            [["advance_return_overdue", "=", True],
+             ["state", "not in", CLOSED_STATES]],
+            limit=limit,
+        )
 
     def ebay_rmas(self, limit: int = 50) -> list[dict]:
         """RMAs originating from eBay returns."""
@@ -170,8 +186,10 @@ class RMAOps(BaseOps):
         open_count = sum(
             counts[s] for s in ("draft", "submitted", "approved", "processing")
         )
-        # Not narrowed by return_method — see overdue_advance_returns.
-        overdue = self.count([["advance_return_overdue", "=", True]])
+        # Not narrowed by return_method, and closed RMAs excluded — see
+        # overdue_advance_returns for both.
+        overdue = self.count([["advance_return_overdue", "=", True],
+                              ["state", "not in", CLOSED_STATES]])
         return {
             "summary": (
                 f"RMA pipeline: {open_count} open "

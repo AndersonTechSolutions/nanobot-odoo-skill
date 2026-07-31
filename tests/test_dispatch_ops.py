@@ -101,7 +101,12 @@ class TestDispatchBoard:
         )
 
     def test_omitted_date_passes_false_not_none(self, fsm, mock_client):
-        """XML-RPC cannot marshal None — it must go over as False."""
+        """Odoo wants False for "no date", not None.
+
+        The client sets ``allow_none=True``, so a None would marshal happily
+        as XML-RPC ``<nil/>`` and then blow up inside ``fields.Date`` — the
+        failure would surface remotely, not here.
+        """
         mock_client._models.execute_kw.return_value = {}
         fsm.dispatch_board()
         _, _, args = _args_of(mock_client)
@@ -161,16 +166,44 @@ class TestUnscheduleJob:
     def test_success_is_verified_by_readback(self, fsm, mock_client):
         """dispatch_unassign returns True unconditionally — trust the record."""
         mock_client._models.execute_kw.side_effect = [
-            True,
-            [{"id": 5, "name": "Job", "planned_date_begin": False}],
+            [{"id": 5, "name": "Job",
+              "planned_date_begin": "2026-08-03 13:00:00"}],   # before
+            True,                                              # the RPC
+            [{"id": 5, "name": "Job", "planned_date_begin": False}],  # after
         ]
         out = fsm.unschedule_job(5)
         assert out["status"] == "unscheduled"
         assert out["changed_anything"] is True
 
+    def test_sends_task_id_as_a_positional_not_an_ids_list(self, fsm, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [{"id": 5, "planned_date_begin": "2026-08-03 13:00:00"}],
+            True,
+            [{"id": 5, "planned_date_begin": False}],
+        ]
+        fsm.unschedule_job(5)
+        model, method, args = _args_of(mock_client, 1)
+        assert (model, method) == ("project.task", "dispatch_unassign")
+        assert args == [5], f"expected a bare positional, got {args!r}"
+
+    def test_already_unscheduled_is_a_no_op_not_a_success(self, fsm, mock_client):
+        """The end state is identical either way — only the prior state tells.
+
+        Reporting changed_anything=True here would be a lie, and the RPC
+        should not fire at all.
+        """
+        mock_client._models.execute_kw.return_value = [
+            {"id": 5, "name": "Job", "planned_date_begin": False}
+        ]
+        out = fsm.unschedule_job(5)
+        assert out["status"] == "no_change"
+        assert out["changed_anything"] is False
+        assert mock_client._models.execute_kw.call_count == 1
+
     def test_still_scheduled_is_reported_as_refused(self, fsm, mock_client):
         """The True return is worthless if the dates never cleared."""
         mock_client._models.execute_kw.side_effect = [
+            [{"id": 5, "planned_date_begin": "2026-08-03 13:00:00"}],  # before
             True,
             [{"id": 5, "name": "Job",
               "planned_date_begin": "2026-08-03 13:00:00"}],
@@ -178,3 +211,66 @@ class TestUnscheduleJob:
         out = fsm.unschedule_job(5)
         assert out["status"] == "refused"
         assert out["changed_anything"] is False
+
+
+# ── Required-argument validation ─────────────────────────────────────
+
+
+class TestNullArguments:
+    """``allow_none=True`` means a None would reach Odoo, not fail locally."""
+
+    def test_schedule_rejects_null_date(self, fsm, mock_client):
+        with pytest.raises(ValueError, match="required"):
+            fsm.schedule_job(task_id=5, date=None, confirm=True)
+        mock_client._models.execute_kw.assert_not_called()
+
+    def test_schedule_rejects_null_task_id(self, fsm, mock_client):
+        with pytest.raises(ValueError, match="required"):
+            fsm.schedule_job(task_id=None, date="2026-08-03", confirm=True)
+        mock_client._models.execute_kw.assert_not_called()
+
+    def test_unschedule_rejects_null_task_id(self, fsm, mock_client):
+        with pytest.raises(ValueError, match="required"):
+            fsm.unschedule_job(None)
+        mock_client._models.execute_kw.assert_not_called()
+
+
+# ── CLI exposure ─────────────────────────────────────────────────────
+
+
+class TestModelHelperIsNotCliReachable:
+    """``_call_model`` must stay private.
+
+    The generic ``call`` command exposes every public callable and infers
+    write-ness from the *requested* name. A public ``call_model`` would
+    therefore be classified as a read, letting
+    ``call field_service.call_model --args '{"method": "dispatch_assign", ...}'``
+    perform a customer-notifying write with no --confirm, and reach arbitrary
+    model-level methods on every namespace — bypassing ALLOWED_ACTIONS too.
+    """
+
+    def test_helper_is_private(self):
+        from odoo_skill.models._base import BaseOps
+        assert not hasattr(BaseOps, "call_model")
+        assert hasattr(BaseOps, "_call_model")
+
+    def test_no_ops_class_exposes_a_public_model_caller(self):
+        """No subclass may re-expose it under a public name either."""
+        from odoo_skill.models._base import BaseOps
+        for cls in (FieldServiceOps, MessagingOps):
+            public = [
+                m for m in dir(cls)
+                if not m.startswith("_") and "call_model" in m
+            ]
+            assert public == [], f"{cls.__name__} exposes {public}"
+
+    def test_write_classification(self):
+        """odoo.py's resolver rejects anything starting with an underscore."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "odoo_cli", os.path.join(SKILL_DIR, "odoo.py"))
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        assert not cli._op_writes("dispatch_board")
+        assert cli._op_writes("schedule_job")
+        assert cli._op_writes("unschedule_job")

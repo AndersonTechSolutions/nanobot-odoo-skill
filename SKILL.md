@@ -218,9 +218,10 @@ their suggestions mean nothing until `research_comps` runs.
 ### Unsearchable computed fields
 
 Some custom fields are computed and not stored. A domain over an
-**unsearchable** one is not rejected — Odoo silently drops the clause and
-returns the *unfiltered* set, producing plausible but wrong answers. These
-are filtered client-side instead, over a bounded scan:
+**unsearchable** one is not rejected — Odoo drops the clause and returns the
+*unfiltered* set, producing plausible but wrong answers. It logs an error
+server-side, but nothing reaches the RPC caller. These are filtered
+client-side instead, over a bounded scan:
 
 | Model | Field |
 |---|---|
@@ -239,9 +240,10 @@ Non-stored but searchable — filter these server-side:
 `project.task.is_fsm` (related to `project_id.is_fsm`) and
 `rma.order.advance_return_overdue` (has `_search_advance_overdue`).
 
-Two more read better through a stored twin: `helpdesk.ticket.ebay_order_number`
-→ `ebay_order_id.name`; `quick.product.draft.price_confidence_pct` →
-`price_confidence`.
+`quick.product.draft.price_confidence_pct` reads better through its stored
+twin `price_confidence`. `helpdesk.ticket.ebay_order_number` is searchable
+(`related="ebay_order_id.order_id"`) — filter it directly. Note
+`ebay.order` has **no** `name` field, so `ebay_order_id.name` raises.
 
 Before adding any filter:
 

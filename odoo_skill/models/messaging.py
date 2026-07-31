@@ -228,8 +228,8 @@ class MessagingOps(BaseOps):
         """
         if view not in INBOX_VIEWS:
             raise ValueError(f"view must be one of {INBOX_VIEWS}, got {view!r}")
-        # ``get_inbox_data`` is @api.model — no ids list (see call_model).
-        data = self.call_model("get_inbox_data", view, search or "")
+        # ``get_inbox_data`` is @api.model — no ids list (see _call_model).
+        data = self._call_model("get_inbox_data", view, search or "")
 
         counts = data.get("counts", {}) or {}
         convs = data.get("conversations", []) or []

@@ -139,8 +139,8 @@ class FieldServiceOps(BaseOps):
         """
         if days < 1:
             raise ValueError(f"days must be at least 1, got {days!r}")
-        # @api.model — no ids list (see BaseOps.call_model).
-        data = self.call_model("get_dispatch_board", date_from or False, days)
+        # @api.model — no ids list (see BaseOps._call_model).
+        data = self._call_model("get_dispatch_board", date_from or False, days)
 
         backlog = data.get("unscheduled", []) or []
         booked = data.get("scheduled", []) or []
@@ -167,6 +167,11 @@ class FieldServiceOps(BaseOps):
         ``_fsm_notify_scheduled()`` on success, confirming the appointment, so
         this is not a dry-run-able operation — hence *confirm*.
 
+        Delivery is not guaranteed and Odoo does not report it back: that
+        helper silently sends nothing when the customer has no email, the
+        template is missing, or a confirmation already went out. The result
+        therefore says "notification attempted", never "notified".
+
         Args:
             task_id: The FSM task to schedule.
             date: ``YYYY-MM-DD`` for the day column. The start hour and
@@ -178,6 +183,14 @@ class FieldServiceOps(BaseOps):
         Returns:
             The updated job, or a ``needs_confirmation`` envelope.
         """
+        if task_id is None or date is None:
+            # The client enables allow_none=True, so a None here would be
+            # marshalled as XML-RPC <nil/> and fail inside Odoo. Fail locally
+            # with a usable message instead.
+            raise ValueError(
+                f"task_id and date are required, got task_id={task_id!r}, "
+                f"date={date!r}"
+            )
         if not confirm:
             return {
                 "status": "needs_confirmation",
@@ -190,7 +203,7 @@ class FieldServiceOps(BaseOps):
                 },
                 "changed_anything": False,
             }
-        ok = self.call_model(
+        ok = self._call_model(
             "dispatch_assign", task_id, user_id or False, date
         )
         # The module returns a bare False when it refuses — the task is not an
@@ -210,7 +223,7 @@ class FieldServiceOps(BaseOps):
             "status": "scheduled",
             "summary": f"Task {task_id} scheduled for {date}"
                        + (f" to user {user_id}" if user_id else " (unassigned)")
-                       + "; customer notified.",
+                       + "; customer notification attempted.",
             "changed_anything": True,
             "job": self.get(task_id),
         }
@@ -223,10 +236,26 @@ class FieldServiceOps(BaseOps):
 
         ``dispatch_unassign`` returns ``True`` unconditionally — including
         when it declines to touch the record because the id is unknown or the
-        task is not an FSM task. Its return value therefore proves nothing,
-        so success is confirmed by reading the dates back instead.
+        task is not an FSM task. Its return value proves nothing, so the
+        outcome is derived from the record itself.
+
+        Reading the *prior* state matters as much as the result: a task that
+        was already unscheduled ends in the same place as one this call
+        actually moved, and reporting ``changed_anything`` for a no-op would
+        be a lie.
         """
-        self.call_model("dispatch_unassign", task_id)
+        if task_id is None:
+            raise ValueError("task_id is required")
+        before = self.get(task_id)
+        if not before.get("planned_date_begin"):
+            return {
+                "status": "no_change",
+                "summary": f"Task {task_id} was already unscheduled.",
+                "changed_anything": False,
+                "job": before,
+            }
+
+        self._call_model("dispatch_unassign", task_id)
         job = self.get(task_id)
         if job.get("planned_date_begin"):
             return {
