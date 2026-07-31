@@ -169,14 +169,19 @@ class TestComputedFiltering:
 
 
 class TestDomainRegressions:
-    """Guards against reintroducing filters on non-stored fields."""
+    """Guards against reintroducing filters on unsearchable fields."""
 
-    def test_field_service_scopes_via_stored_project_flag(self, mock_client):
-        """project.task.is_fsm is not stored; project_id.is_fsm is."""
+    def test_field_service_stays_scoped_to_fsm_tasks(self, mock_client):
+        """Every FieldServiceOps query must be scoped to FSM tasks.
+
+        ``is_fsm`` and ``project_id.is_fsm`` are equally valid here — the
+        former is related to the latter and Odoo resolves either server-side.
+        What matters is that *some* FSM scope is present, so the class can
+        never fall back to returning every ``project.task``.
+        """
         domain = FieldServiceOps(mock_client).BASE_DOMAIN
-        flat = str(domain)
-        assert "project_id.is_fsm" in flat
-        assert "'is_fsm'" not in flat.replace("project_id.is_fsm", "")
+        assert "is_fsm" in str(domain)
+        assert domain, "BASE_DOMAIN must not be empty"
 
     def test_within_sla_excludes_jobs_without_a_deadline(self):
         """sla_days_remaining is False when unset — not 'zero days left'."""

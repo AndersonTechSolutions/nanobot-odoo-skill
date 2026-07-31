@@ -45,10 +45,11 @@ class FieldServiceOps(BaseOps):
 
     #: Every search in this class is scoped to FSM tasks.
     #:
-    #: ``project.task.is_fsm`` is a *related* non-stored field, so filtering
-    #: on it directly is silently ignored by Odoo and returns every project
-    #: task. The scope therefore goes through the stored source of truth,
-    #: ``project.project.is_fsm``, via the task's stored ``project_id``.
+    #: ``project.task.is_fsm`` is non-stored but *is* searchable (it is
+    #: ``related=`` to ``project.project.is_fsm``, which Odoo rewrites the
+    #: domain to), so ``["is_fsm", "=", True]`` would work equally well. This
+    #: spells out the traversal to the stored source of truth explicitly —
+    #: identical semantics, one less indirection to reason about.
     BASE_DOMAIN = [["project_id.is_fsm", "=", True]]
 
     ALLOWED_ACTIONS = frozenset({
@@ -110,6 +111,139 @@ class FieldServiceOps(BaseOps):
         return self.search(
             [["user_ids", "in", [user_id]], ["fsm_done", "=", False]], limit=limit
         )
+
+    # ── Dispatch board ───────────────────────────────────────────────
+
+    def dispatch_board(
+        self, date_from: Optional[str] = None, days: int = 7
+    ) -> dict:
+        """The dispatch board for a date window, as the drag-drop UI sees it.
+
+        Wraps ``project.task.get_dispatch_board`` — one round-trip for the
+        technician roster, day columns, the unscheduled backlog and every
+        scheduled card, already timezone-resolved to the company's tz.
+
+        Args:
+            date_from: ``YYYY-MM-DD`` for the first column. Defaults to the
+                Monday of the current week (the module's own default).
+            days: Number of day columns.
+
+        Returns:
+            Dict with ``days``, ``week_start``, ``technicians``,
+            ``unscheduled`` and ``scheduled``, plus a rendered ``summary``.
+
+        Raises:
+            OdooError: Wrapping Odoo's ``AccessError`` when the API user is
+                not in ``industry_fsm.group_fsm_user``. The module enforces
+                that group on every dispatch RPC.
+        """
+        if days < 1:
+            raise ValueError(f"days must be at least 1, got {days!r}")
+        # @api.model — no ids list (see BaseOps.call_model).
+        data = self.call_model("get_dispatch_board", date_from or False, days)
+
+        backlog = data.get("unscheduled", []) or []
+        booked = data.get("scheduled", []) or []
+        techs = data.get("technicians", []) or []
+        return {
+            "summary": (
+                f"Dispatch board from {data.get('week_start')} ({days}d): "
+                f"{len(booked)} scheduled across {len(techs)} technician(s), "
+                f"{len(backlog)} unscheduled"
+            ),
+            **data,
+        }
+
+    def schedule_job(
+        self,
+        task_id: int,
+        date: str,
+        user_id: Optional[int] = None,
+        confirm: bool = False,
+    ) -> dict:
+        """Place a job on the board for a technician and day.
+
+        **This messages the customer.** The module calls
+        ``_fsm_notify_scheduled()`` on success, confirming the appointment, so
+        this is not a dry-run-able operation — hence *confirm*.
+
+        Args:
+            task_id: The FSM task to schedule.
+            date: ``YYYY-MM-DD`` for the day column. The start hour and
+                duration come from the module's own config parameters.
+            user_id: Technician to assign. ``None`` drops the job on the
+                "Unassigned" lane, clearing any existing assignee.
+            confirm: Must be ``True`` to proceed.
+
+        Returns:
+            The updated job, or a ``needs_confirmation`` envelope.
+        """
+        if not confirm:
+            return {
+                "status": "needs_confirmation",
+                "summary": (
+                    f"Scheduling task {task_id} for {date} will notify the "
+                    f"customer of the appointment. Re-run with confirm=True."
+                ),
+                "would_schedule": {
+                    "task_id": task_id, "date": date, "user_id": user_id,
+                },
+                "changed_anything": False,
+            }
+        ok = self.call_model(
+            "dispatch_assign", task_id, user_id or False, date
+        )
+        # The module returns a bare False when it refuses — the task is not an
+        # FSM task, or the target user is not an FSM technician. Nothing is
+        # written in that case, so surface it rather than reporting success.
+        if not ok:
+            return {
+                "status": "refused",
+                "summary": (
+                    f"Odoo refused to schedule task {task_id}. It is either "
+                    f"not an FSM task, or user {user_id} is not in the field "
+                    f"service technician group."
+                ),
+                "changed_anything": False,
+            }
+        return {
+            "status": "scheduled",
+            "summary": f"Task {task_id} scheduled for {date}"
+                       + (f" to user {user_id}" if user_id else " (unassigned)")
+                       + "; customer notified.",
+            "changed_anything": True,
+            "job": self.get(task_id),
+        }
+
+    def unschedule_job(self, task_id: int) -> dict:
+        """Return a job to the unscheduled backlog, clearing its dates.
+
+        Unlike :meth:`schedule_job` this sends no customer notification, so it
+        needs no confirmation gate.
+
+        ``dispatch_unassign`` returns ``True`` unconditionally — including
+        when it declines to touch the record because the id is unknown or the
+        task is not an FSM task. Its return value therefore proves nothing,
+        so success is confirmed by reading the dates back instead.
+        """
+        self.call_model("dispatch_unassign", task_id)
+        job = self.get(task_id)
+        if job.get("planned_date_begin"):
+            return {
+                "status": "refused",
+                "summary": (
+                    f"Task {task_id} is still scheduled. Odoo declined to "
+                    f"unschedule it — it is most likely not an FSM task."
+                ),
+                "changed_anything": False,
+                "job": job,
+            }
+        return {
+            "status": "unscheduled",
+            "summary": f"Task {task_id} returned to the unscheduled backlog",
+            "changed_anything": True,
+            "job": job,
+        }
 
     def jobs_on(self, date_from: str, date_to: str, limit: int = 100) -> list[dict]:
         """Jobs planned within a datetime window.

@@ -128,14 +128,20 @@ class RMAOps(BaseOps):
     def overdue_advance_returns(self, limit: int = 50) -> list[dict]:
         """Advance replacements where the old unit never came back.
 
-        ``advance_return_overdue`` is computed and not stored; the scan is
-        narrowed to advance-replacement RMAs before filtering client-side.
+        ``advance_return_overdue`` is not stored but *is* searchable — the
+        module gives it a ``_search_advance_overdue`` method that joins to
+        ``rma.order.line`` on ``awaiting_advance_return`` and an elapsed
+        ``advance_return_due_date``. Odoo resolves it server-side, exactly.
+
+        Deliberately **not** narrowed by ``return_method``. An advance
+        replacement is a per-line *resolution* (``replace_advance``), while
+        ``return_method`` describes how the customer ships the old unit back —
+        they are independent. Narrowing on
+        ``return_method == 'advance_replacement'`` drops genuine hits: on
+        staging the one overdue RMA carries ``return_method='ship'``, and no
+        record uses ``advance_replacement`` at all.
         """
-        return self.search_computed(
-            [["return_method", "=", "advance_replacement"]],
-            lambda r: bool(r.get("advance_return_overdue")),
-            limit=limit, extra_fields=["advance_return_overdue"],
-        )
+        return self.search([["advance_return_overdue", "=", True]], limit=limit)
 
     def ebay_rmas(self, limit: int = 50) -> list[dict]:
         """RMAs originating from eBay returns."""
@@ -164,11 +170,8 @@ class RMAOps(BaseOps):
         open_count = sum(
             counts[s] for s in ("draft", "submitted", "approved", "processing")
         )
-        overdue = self.count_computed(
-            [["return_method", "=", "advance_replacement"]],
-            lambda r: bool(r.get("advance_return_overdue")),
-            extra_fields=["advance_return_overdue"],
-        )
+        # Not narrowed by return_method — see overdue_advance_returns.
+        overdue = self.count([["advance_return_overdue", "=", True]])
         return {
             "summary": (
                 f"RMA pipeline: {open_count} open "
