@@ -101,14 +101,17 @@ class HelpdeskOps(BaseOps):
     def find_by_ebay_order(self, order_number: str, limit: int = 10) -> list[dict]:
         """Locate tickets attached to an eBay order number.
 
-        ``ebay_order_number`` is a non-stored related field, so the search
-        goes through the stored ``ebay_order_id`` relation instead, with a
-        fallback to the stored ``atech_ebay_external_id`` used by the
-        exception-event bridge.
+        ``ebay_order_number`` is non-stored but searchable — it is
+        ``related="ebay_order_id.order_id"``, and Odoo rewrites the domain to
+        that stored target. Falls back to the stored
+        ``atech_ebay_external_id`` used by the exception-event bridge.
+
+        Do not "optimise" this into ``ebay_order_id.name``: ``ebay.order`` has
+        no ``name`` field, so that domain raises rather than returning nothing.
         """
         return self.search(
             ["|",
-             ["ebay_order_id.name", "ilike", order_number],
+             ["ebay_order_number", "ilike", order_number],
              ["atech_ebay_external_id", "ilike", order_number]],
             limit=limit,
         )

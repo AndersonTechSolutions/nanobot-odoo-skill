@@ -376,10 +376,19 @@ class TodoMatrixOps:
         Returns:
             Dict with ``team_totals`` and ``employees`` list.
         """
-        result = self.client.execute(
-            self.WORKLOAD_MODEL, "get_workload_data", [],
-        )
-        return result
+        # ``get_workload_data`` is decorated ``@api.model``, so Odoo dispatches
+        # it through ``_call_kw_model``, which forwards every positional
+        # straight to the method instead of consuming a leading ids list the
+        # way ``_call_kw_multi`` does for record methods. This particular
+        # method declares no positional parameters, so passing ``[]`` as an
+        # ids list arrived as a real argument and raised "takes 1 positional
+        # argument but 2 were given".
+        #
+        # Note this is about *this* method's signature, not about
+        # ``@api.model`` generally — ``search(domain)``, ``create(vals)`` and
+        # ``fields_get(allfields)`` are also model-level and do take a leading
+        # positional, which is why the calls in ``client.py`` pass one.
+        return self.client.execute(self.WORKLOAD_MODEL, "get_workload_data")
 
     # ── Checklist ─────────────────────────────────────────────────────
 

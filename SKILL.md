@@ -139,8 +139,8 @@ Any method whose name implies a write (`create`, `update`, `set`, `post`,
 | `warranty` | `warranty.registration` | `atech_warranty` | `check_coverage`, `expiring_soon`, `open_claims`, `create_claim` |
 | `consignment` | `consignment.order` | `atech_consignment` | `pipeline_summary`, `items_awaiting_payout`, `set_pricing` |
 | `helpdesk` | `helpdesk.ticket` | `atech_helpdesk` | `desk_summary`, `ebay_action_needed`, `draft_ai_reply` |
-| `messaging` | `atech.conversation` | `atech_messaging` | `inbox_summary`, `unread`, `get_thread`, `reply` |
-| `field_service` | `project.task` (FSM) | `atech_field_service` | `dispatch_summary`, `unscheduled_jobs`, `schedule` |
+| `messaging` | `atech.conversation` | `atech_messaging` | `inbox`, `inbox_summary`, `unread`, `get_thread`, `reply` |
+| `field_service` | `project.task` (FSM) | `atech_field_service` | `dispatch_board`, `schedule_job`, `unschedule_job`, `unscheduled_jobs` |
 | `ebay` | `ebay.listing` | `sale_ebay` | `listing_summary`, `research_comps`, `get_pricing`, `apply_suggested_price`, `publish` |
 | `product_drafts` | `quick.product.draft` | `quick_product`, `new_product_gui` | `attention_needed`, `stalled_drafts`, `ai_spend_summary` |
 | `itad` | `tasks` | `projects-custom` | `ops_summary`, `upcoming_pickups`, `sla_at_risk`, `schedule_pickup` |
@@ -157,6 +157,44 @@ Each ops class carries an explicit `ALLOWED_ACTIONS` allowlist, because
 `execute_kw` will otherwise invoke *any* public method including `unlink`.
 Deliberately excluded: `quick.product.draft.action_commit` (creates a
 permanent catalogue product) and all ITAD buttons (compliance weight).
+
+### Dispatch payloads (one round-trip)
+
+Two ops wrap the same model-level methods the Odoo UIs call, returning a
+whole working surface in a single request instead of a dozen searches:
+
+```bash
+python3 odoo.py call messaging.inbox --args '{"view": "unassigned"}'
+python3 odoo.py call messaging.inbox --args '{"search": "dell latitude"}'
+python3 odoo.py call field_service.dispatch_board --args '{"days": 7}'
+```
+
+`messaging.inbox` returns conversation cards, counts across every lane, the
+agent roster and canned responses. `view` is a *lane*, not a status —
+`mine` and `unassigned` cut across statuses, and `mine` resolves against the
+**authenticated API user**, not whoever the agent is acting for. A `search`
+spans all statuses and overrides `view`; queries under 2 characters are
+ignored by the module to avoid a full message-body scan.
+
+`field_service.dispatch_board` returns technicians, day columns, the
+unscheduled backlog and scheduled cards, timezone-resolved. It requires the
+API user to be in `industry_fsm.group_fsm_user` — the module enforces that
+on every dispatch RPC, so a missing group surfaces as an Odoo `AccessError`.
+
+Scheduling **notifies the customer** (`_fsm_notify_scheduled`), so it is
+gated on an explicit `confirm`:
+
+```bash
+python3 odoo.py call field_service.schedule_job \
+  --args '{"task_id": 812, "date": "2026-08-03", "user_id": 25, "confirm": true}' --confirm
+python3 odoo.py call field_service.unschedule_job --args '{"task_id": 812}' --confirm
+```
+
+Odoo returns a bare `False` from `dispatch_assign` when it refuses (the task
+is not FSM, or the user is not a technician) — that is reported as
+`status: "refused"`, never as success. `dispatch_unassign` is worse: it
+returns `True` unconditionally, even when it changes nothing, so
+`unschedule_job` confirms by reading the dates back.
 
 ### eBay repricing is proposal-first
 
@@ -177,25 +215,48 @@ python3 odoo.py call ebay.apply_suggested_price \
 `stale_comps` lists listed products whose comps have never been fetched —
 their suggestions mean nothing until `research_comps` runs.
 
-### Non-stored computed fields
+### Unsearchable computed fields
 
-Some custom fields are computed and **not stored**. A domain over one is not
-rejected — Odoo silently drops the clause and returns the *unfiltered* set,
-producing plausible but wrong answers. These are filtered client-side
-instead:
+Some custom fields are computed and not stored. A domain over an
+**unsearchable** one is not rejected — Odoo drops the clause and returns the
+*unfiltered* set, producing plausible but wrong answers. It logs an error
+server-side, but nothing reaches the RPC caller. These are filtered
+client-side instead, over a bounded scan:
 
 | Model | Field |
 |---|---|
 | `repair.order` | `is_overdue`, `is_awaiting_parts` |
-| `rma.order` | `can_execute_resolutions`, `advance_return_overdue` |
+| `rma.order` | `can_execute_resolutions` |
 | `tasks` (ITAD) | `itad_can_dispatch`, `itad_can_price`, `itad_can_receive`, `sla_days_remaining` |
 
-And three with stored twins, used instead: `project.task.is_fsm` →
-`project_id.is_fsm`; `helpdesk.ticket.ebay_order_number` →
-`ebay_order_id.name`; `quick.product.draft.price_confidence_pct` →
-`price_confidence`.
+**The discriminator is `searchable`, not `store`.** A non-stored field is
+still searchable when it is `related=` to a stored one, or when its
+definition supplies a `search=` method — Odoo then rewrites the domain and
+resolves it server-side, correctly. Filtering those client-side is strictly
+worse: the scan is capped at `COMPUTED_SCAN_CAP` rows and silently
+under-reports past it, where a server-side domain is exact.
 
-**Check `store` before adding any filter.**
+Non-stored but searchable — filter these server-side:
+`project.task.is_fsm` (related to `project_id.is_fsm`) and
+`rma.order.advance_return_overdue` (has `_search_advance_overdue`).
+
+`quick.product.draft.price_confidence_pct` reads better through its stored
+twin `price_confidence`. `helpdesk.ticket.ebay_order_number` is searchable
+(`related="ebay_order_id.order_id"`) — filter it directly. Note
+`ebay.order` has **no** `name` field, so `ebay_order_id.name` raises.
+
+Before adding any filter:
+
+```python
+client.fields_get("rma.order", attributes=["store", "searchable"])
+```
+
+and sanity-check that the filtered count actually differs from the
+unfiltered one.
+
+> Beware of narrowing clauses that merely *look* related. `advance_return_overdue`
+> is driven by per-line `resolution == 'replace_advance'`, **not** by the
+> order-level `return_method` — pairing the two hid a real overdue RMA.
 
 ## Python API
 

@@ -145,13 +145,35 @@ class BaseOps:
     #
     # Several of the custom modules expose useful flags as *non-stored*
     # computed fields — repair.order.is_overdue, rma.order.can_execute_resolutions,
-    # tasks.itad_can_dispatch, and others. These have no database column, so
-    # they cannot appear in a domain.
+    # tasks.itad_can_dispatch, and others.
     #
-    # The failure mode is nasty: rather than raising, Odoo silently drops the
-    # clause and returns the *unfiltered* set. A caller asking for "overdue
-    # repairs" gets every open repair back and has no way to tell. So any
-    # filter on such a field runs client-side, over a bounded scan.
+    # The failure mode is nasty: rather than raising, Odoo drops the clause
+    # and returns the *unfiltered* set. A caller asking for "overdue repairs"
+    # gets every open repair back with no indication anything went wrong — it
+    # logs an error with a traceback server-side, but nothing reaches the RPC
+    # caller. So any filter on such a field runs client-side, over a bounded
+    # scan.
+    #
+    # IMPORTANT — the discriminator is ``searchable``, not ``store``. A
+    # non-stored field is still searchable when it is ``related=`` to a stored
+    # one, or when its definition supplies a ``search=`` method; in that case
+    # Odoo rewrites the domain and resolves it server-side, correctly. Only
+    # ``searchable: False`` fields get dropped. Checking ``store`` alone
+    # over-flags and pushes filters client-side that did not need to be, which
+    # is strictly worse — a client-side scan is capped at COMPUTED_SCAN_CAP
+    # rows and silently under-reports past it, where a server-side domain is
+    # exact.
+    #
+    # Confirm before assuming, e.g.:
+    #     fields_get([field], attributes=["store", "searchable"])
+    # and sanity-check that a filtered count differs from the unfiltered one.
+    #
+    # Verified searchable: False (need this path) — repair.order.is_overdue,
+    # repair.order.is_awaiting_parts, rma.order.can_execute_resolutions,
+    # tasks.itad_can_dispatch / itad_can_price / itad_can_receive,
+    # tasks.sla_days_remaining.
+    # Verified searchable: True (filter server-side) — project.task.is_fsm,
+    # rma.order.advance_return_overdue.
 
     #: How many rows to pull per requested row when filtering client-side.
     COMPUTED_SCAN_FACTOR: int = 10
@@ -283,6 +305,29 @@ class BaseOps:
     def actions(self) -> list[str]:
         """List the methods :meth:`run_action` will accept."""
         return sorted(self.ALLOWED_ACTIONS)
+
+    def _call_model(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Call an ``@api.model`` (model-level) method on :attr:`MODEL`.
+
+        The counterpart to :meth:`run_action`, and the distinction is not
+        cosmetic. Odoo dispatches record methods through ``_call_kw_multi``,
+        which strips the leading element of the argument vector and browses it
+        as ids; model-level methods go through ``_call_kw_model``, which
+        forwards every positional straight to the callee.
+
+        So a model-level method must be called with **no ids list** — passing
+        one silently becomes a real argument and produces "takes N positional
+        arguments but N+1 were given". Routing these through a named helper
+        keeps that asymmetry visible at the call site instead of leaving it to
+        be rediscovered against a live server.
+
+        Args:
+            method: Model-level method name.
+            *args: The method's own declared positionals — *not* an ids list.
+            **kwargs: Forwarded as keyword arguments.
+        """
+        self._require()
+        return self.client.execute(self.MODEL, method, *args, **kwargs)
 
     # ── Helpers for subclasses ───────────────────────────────────────
 

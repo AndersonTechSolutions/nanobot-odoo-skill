@@ -47,6 +47,11 @@ STATUSES = ["open", "pending", "resolved", "snoozed"]
 #: Transports a conversation can arrive on.
 CHANNELS = ["sms", "rcs", "whatsapp", "ebay", "facebook", "instagram"]
 
+#: Views ``get_inbox_data`` accepts. Note these are inbox *lanes*, not
+#: ``status`` values — ``mine`` and ``unassigned`` cut across statuses.
+INBOX_VIEWS = ["open", "mine", "unassigned", "pending", "snoozed",
+               "resolved", "all"]
+
 
 class MessagingOps(BaseOps):
     """Operations on customer conversations across SMS/RCS/eBay/Meta."""
@@ -195,6 +200,49 @@ class MessagingOps(BaseOps):
                        f"{'marked as spam' if is_spam else 'unmarked as spam'}",
             "conversation": record,
         }
+
+    # ── Inbox dispatch payload ───────────────────────────────────────
+
+    def inbox(self, view: str = "open", search: Optional[str] = None) -> dict:
+        """The agent inbox in one round-trip, as the OWL client sees it.
+
+        Wraps ``atech.conversation.get_inbox_data`` — the same model-level
+        method backing the Odoo inbox UI. One call yields the conversation
+        cards for *view*, counts across every view, the agent roster and the
+        canned responses, which is markedly cheaper than reassembling that
+        from individual searches.
+
+        Args:
+            view: One of :data:`INBOX_VIEWS`. ``mine`` and ``unassigned`` are
+                resolved against the *authenticated API user*, not whoever an
+                agent is acting on behalf of — so ``mine`` means the API
+                user's queue.
+            search: Free text over name, contact label, number and message
+                bodies. Applies across *all* statuses and overrides *view*.
+                The module ignores queries shorter than 2 characters to avoid
+                a full message-body scan.
+
+        Returns:
+            Dict with ``conversations``, ``counts``, ``agents``, ``canned``,
+            plus a rendered ``summary``.
+        """
+        if view not in INBOX_VIEWS:
+            raise ValueError(f"view must be one of {INBOX_VIEWS}, got {view!r}")
+        # ``get_inbox_data`` is @api.model — no ids list (see _call_model).
+        data = self._call_model("get_inbox_data", view, search or "")
+
+        counts = data.get("counts", {}) or {}
+        convs = data.get("conversations", []) or []
+        if search:
+            headline = f"Inbox search {search!r}: {len(convs)} conversation(s)"
+        else:
+            headline = (
+                f"Inbox [{view}]: {len(convs)} conversation(s) shown; "
+                f"{counts.get('open', 0)} open, "
+                f"{counts.get('unassigned', 0)} unassigned, "
+                f"{counts.get('pending', 0)} pending"
+            )
+        return {"summary": headline, **data}
 
     # ── Summary ──────────────────────────────────────────────────────
 

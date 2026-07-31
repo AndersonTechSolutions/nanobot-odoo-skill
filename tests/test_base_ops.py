@@ -70,6 +70,25 @@ class TestActionAllowlist:
         assert out["method"] == "action_go"
         assert out["record"]["id"] == 1
 
+    def test_dispatch_sends_the_id_as_a_record_list(self, dummy, mock_client):
+        """Button methods are record methods — the id goes in a leading list.
+
+        The mirror of the ``get_workload_data`` bug: model-level methods take
+        no ids list, record methods require one. Asserting only the return
+        shape leaves the argument vector unchecked, which is how that bug
+        survived a passing suite.
+        """
+        mock_client._models.execute_kw.side_effect = [
+            True,
+            [{"id": 7, "name": "x", "flag": False}],
+        ]
+        dummy.run_action(7, "action_go")
+
+        # execute_kw(db, uid, key, model, method, args_list, kwargs_dict)
+        call = mock_client._models.execute_kw.call_args_list[0][0]
+        assert call[4] == "action_go"
+        assert call[5] == [[7]], f"expected a leading ids list, got {call[5]!r}"
+
     def test_actions_lists_the_allowlist(self, dummy):
         assert dummy.actions() == ["action_go"]
 
@@ -150,14 +169,19 @@ class TestComputedFiltering:
 
 
 class TestDomainRegressions:
-    """Guards against reintroducing filters on non-stored fields."""
+    """Guards against reintroducing filters on unsearchable fields."""
 
-    def test_field_service_scopes_via_stored_project_flag(self, mock_client):
-        """project.task.is_fsm is not stored; project_id.is_fsm is."""
+    def test_field_service_stays_scoped_to_fsm_tasks(self, mock_client):
+        """Every FieldServiceOps query must be scoped to FSM tasks.
+
+        ``is_fsm`` and ``project_id.is_fsm`` are equally valid here — the
+        former is related to the latter and Odoo resolves either server-side.
+        What matters is that *some* FSM scope is present, so the class can
+        never fall back to returning every ``project.task``.
+        """
         domain = FieldServiceOps(mock_client).BASE_DOMAIN
-        flat = str(domain)
-        assert "project_id.is_fsm" in flat
-        assert "'is_fsm'" not in flat.replace("project_id.is_fsm", "")
+        assert "is_fsm" in str(domain)
+        assert domain, "BASE_DOMAIN must not be empty"
 
     def test_within_sla_excludes_jobs_without_a_deadline(self):
         """sla_days_remaining is False when unset — not 'zero days left'."""

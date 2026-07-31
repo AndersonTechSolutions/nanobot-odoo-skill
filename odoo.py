@@ -536,7 +536,8 @@ OPS_NAMESPACES = {
 # Method-name prefixes that mutate data. These require --confirm.
 _WRITE_PREFIXES = (
     "create", "update", "add", "set", "post", "reply", "assign", "schedule",
-    "reschedule", "apply", "publish", "end_", "mark", "record", "run_action",
+    "reschedule", "unschedule", "apply", "publish", "end_", "mark", "record",
+    "run_action",
     "run_item_action", "run_claim_action", "run_product_action", "delete",
     "unlink", "smart_create",
 )
