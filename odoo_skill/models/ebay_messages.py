@@ -131,10 +131,16 @@ class EbayMessageOps(BaseOps):
         actually costs money when it is ignored.
         """
         return self.search(
-            [["status", "=", "new"],
-             ["receive_date", "<=", utc_stamp(-timedelta(hours=older_than_hours))]],
-            limit=limit, order="receive_date asc",
+            self._aging_domain(older_than_hours), limit=limit,
+            order="receive_date asc",
         )
+
+    def _aging_domain(self, older_than_hours: int = 24) -> list:
+        """Domain for the response-time queue — shared by the list and count."""
+        return [
+            ["status", "=", "new"],
+            ["receive_date", "<=", utc_stamp(-timedelta(hours=older_than_hours))],
+        ]
 
     def for_item(self, item_id: str, limit: int = 50) -> list[dict]:
         """Messages about one eBay item number."""
@@ -145,17 +151,40 @@ class EbayMessageOps(BaseOps):
         return self.search([["sender", "ilike", sender]], limit=limit)
 
     def messages_for_order(self, order_ref: str, limit: int = 50) -> list[dict]:
-        """Messages tied to an eBay order number.
+        """Messages tied to one eBay order number.
 
         ``ebay.message.order_id`` is computed and ``searchable: False``, so a
-        domain on it would be dropped and return the whole inbox. The order is
-        resolved first and its ``item_id`` used instead, which is stored.
+        domain on it is dropped and would return the whole inbox. The order is
+        resolved first and its stored ``item_id`` used to narrow the scan.
+
+        But ``item_id`` identifies the *listing*, not the order: a fixed-price
+        listing sells many times, so narrowing on it alone returns every
+        buyer's messages for that listing. That is worse than useless here —
+        it silently mixes other customers' correspondence into an answer about
+        one order. So ``order_id`` is read back per record and matched
+        exactly, client-side, over the narrowed set.
         """
         orders = self.find_order(order_ref, limit=5)
         item_ids = [o["item_id"] for o in orders if o.get("item_id")]
+        order_ids = {o["id"] for o in orders}
         if not item_ids:
             return []
-        return self.search([["item_id", "in", item_ids]], limit=limit)
+        want = list(self.LIST_FIELDS)
+        if "order_id" not in want:
+            want.append("order_id")
+        window = self._scan_window(limit)
+        rows = self.client.search_read(
+            self.MODEL, [["item_id", "in", item_ids]],
+            fields=want, limit=window, order=self.ORDER,
+        )
+        if len(rows) >= window:
+            logger.warning(
+                "ebay.message: messages_for_order scanned the full %d-row "
+                "window for item(s) %s; results may be incomplete.",
+                window, ", ".join(item_ids),
+            )
+        matched = [r for r in rows if _ref_id(r.get("order_id")) in order_ids]
+        return matched[:limit]
 
     def get_thread(self, message_id: int) -> dict:
         """Full conversation for a message, including what we actually sent."""
@@ -339,7 +368,7 @@ class EbayMessageOps(BaseOps):
         unassigned = self.count(
             [["status", "=", "new"], ["user_id", "=", False]]
         )
-        aging = len(self.aging(older_than_hours=24, limit=200))
+        aging = self.count(self._aging_domain(24))
         drafts = self.count(
             [["reply_draft", "not in", [False, ""]], ["status", "!=", "closed"]]
         )
@@ -365,3 +394,10 @@ class EbayMessageOps(BaseOps):
             "drafts_pending": drafts,
             "orders_without_sale_order": orphan_orders,
         }
+
+
+def _ref_id(value: Any) -> Any:
+    """The id out of a many2one ``[id, name]`` pair, or None."""
+    if isinstance(value, (list, tuple)) and value:
+        return value[0]
+    return value or None

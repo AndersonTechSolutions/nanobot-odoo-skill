@@ -341,6 +341,7 @@ class TestNullMarshalFault:
         from odoo_skill.models.fb_marketplace import FbMarketplaceOps
         ops = FbMarketplaceOps(mock_client)
         ops._available = True
+        ops._model_field_cache = set()
         mock_client._models.execute_kw.side_effect = [
             self._fault("TypeError: cannot marshal None unless allow_none is enabled"),
             [{"id": 7, "name": "Dell", "state": "sold"}],

@@ -45,9 +45,11 @@ _LIST_FIELDS = [
     "order_confirmation_sent", "signed_by", "signed_on",
 ]
 
+# NOTE: sale.order carries no partner_email / partner_phone fields — contact
+# details live on the partner. Naming them here makes every get() raise, since
+# read() rejects unknown fields outright rather than skipping them.
 _DETAIL_FIELDS = _LIST_FIELDS + [
-    "partner_email", "partner_phone", "commitment_date", "user_id",
-    "delivery_status", "invoice_status", "note",
+    "commitment_date", "user_id", "delivery_status", "invoice_status", "note",
 ]
 
 #: ir.config_parameter holding the public status-page base URL.

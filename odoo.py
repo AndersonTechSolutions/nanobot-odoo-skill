@@ -571,6 +571,10 @@ _WRITE_PREFIXES = (
     "revoke_", "confirm_", "receive_", "flag_", "note_", "send_", "revise_",
     "log_", "move_", "remove_", "generate_", "reset_", "close_", "save_",
     "draft_reply", "draft_ai_reply", "find_or_create",
+    # research_comps calls the eBay Browse API and writes recomputed comp
+    # aggregates back to the product; learn_location persists an alias to
+    # location_vocab.json. Both mutate despite reading like queries.
+    "research", "learn",
 )
 
 

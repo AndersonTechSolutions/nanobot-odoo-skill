@@ -313,23 +313,39 @@ class HelpdeskOps(BaseOps):
         ticket, so this resolves the reminders first and reads the tickets
         they point at — a domain on the ticket side would find nothing.
         """
+        ticket_ids = self._escalated_ticket_ids()
+        if not ticket_ids:
+            return []
+        return self.search(
+            [["id", "in", ticket_ids], ["close_date", "=", False]], limit=limit
+        )
+
+    def _escalated_ticket_ids(self) -> list[int]:
+        """Distinct ticket ids that have fired an escalation.
+
+        Bounded by ``COMPUTED_SCAN_CAP`` reminder rows, and it says so when it
+        hits the cap — an escalation older than that window is not reported.
+        Shared by :meth:`escalated_tickets` and :meth:`desk_summary` so the
+        list and the count cannot disagree.
+        """
         self._require()
         rows = self.client.search_read(
             self.REMINDER_MODEL, [["level", "=", "escalation"]],
             fields=["ticket_id"], limit=self.COMPUTED_SCAN_CAP,
             order="reference_date desc",
         )
-        ticket_ids = []
+        if len(rows) >= self.COMPUTED_SCAN_CAP:
+            logger.warning(
+                "helpdesk.ticket.reminder: escalation scan hit the %d-row cap; "
+                "older escalations are not reported.", self.COMPUTED_SCAN_CAP,
+            )
+        ticket_ids: list[int] = []
         for row in rows:
             ref = row.get("ticket_id")
             tid = ref[0] if isinstance(ref, (list, tuple)) else ref
             if tid and tid not in ticket_ids:
                 ticket_ids.append(tid)
-        if not ticket_ids:
-            return []
-        return self.search(
-            [["id", "in", ticket_ids], ["close_date", "=", False]], limit=limit
-        )
+        return ticket_ids
 
     def reminder_rules(self) -> list[dict]:
         """The rules that drive reminders and escalations."""
@@ -475,7 +491,10 @@ class HelpdeskOps(BaseOps):
             )
         except Exception:  # noqa: BLE001 — a summary must not fail on one count
             cases_due = disputes = -1
-        escalated = len(self.escalated_tickets(limit=200))
+        esc_ids = self._escalated_ticket_ids()
+        escalated = self.count(
+            [["id", "in", esc_ids], ["close_date", "=", False]]
+        ) if esc_ids else 0
         return {
             "summary": (
                 f"Helpdesk: {open_count} open ({unassigned} unassigned), "

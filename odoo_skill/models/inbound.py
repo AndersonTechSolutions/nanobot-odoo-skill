@@ -115,15 +115,22 @@ class InboundOps(BaseOps):
         """Packages past their confirmation deadline.
 
         ``status`` is flipped to ``overdue`` by the ``_check_deadlines`` cron,
-        so this also catches anything delivered whose deadline has passed but
-        whose cron run has not landed yet.
+        so this also catches anything whose deadline has passed but whose cron
+        run has not landed yet.
+
+        The second branch mirrors ``_check_deadlines`` exactly, **including its
+        ``delivered_at`` requirement**. Without that clause the query also
+        returns in-transit and pending shipments whose deadline happens to have
+        elapsed — packages that have not arrived, are not anyone's to confirm,
+        and which the module itself would never mark overdue.
         """
         now = utc_stamp()
         return self.search(
             ["|",
              ["status", "=", "overdue"],
-             "&", "&",
+             "&", "&", "&",
              ["status", "not in", ["confirmed", "overdue"]],
+             ["delivered_at", "!=", False],
              ["confirm_deadline", "!=", False],
              ["confirm_deadline", "<", now]],
             limit=limit,

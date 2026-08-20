@@ -17,7 +17,8 @@ $ python3 -m pytest tests/ -q
 | `test_cli.py` | Subcommand parsing and output envelopes |
 | `test_dispatch_ops.py` | `@api.model` wire shape (no ids list) |
 | `test_new_connectors.py` | FB Marketplace, inbound, auctions, eBay messages, PC builds, order status, photography |
-| `test_write_gate.py` | `--confirm` classification for every exposed method |
+| `test_write_gate.py` | `--confirm` classification, frozen against a full method inventory |
+| `test_live_fields.py` | live: declared fields exist and `get()` works (skipped without credentials) |
 
 ## Live verification (Odoo 17)
 
@@ -43,6 +44,7 @@ fault. No code changes are needed for any of them:
 | `fb_marketplace` | API user not in `fb_marketplace_lister.group_fb_marketplace_user` | grant the group |
 | `photography` | API user not in `product_photography.group_photo_user` | grant the group |
 | `auctions` | `auction_scrapper_catalog` not installed on prod (staging-only) | none — degrades cleanly |
+| `itad` | API user cannot read the related `itad.order.service.line`, so `itad.get()` raises | grant `ITAD / User` |
 
 `atech_order_status.status_page_url` **is** set on prod
 (`https://andersontechsolutions.com/order-status/`) and `order_status.settings()`

@@ -42,6 +42,7 @@ class DummyOps(BaseOps):
 def dummy(mock_client):
     ops = DummyOps(mock_client)
     ops._available = True          # skip the fields_get probe
+    ops._model_field_cache = set()  # schema unknown -> _fields() does not filter
     return ops
 
 

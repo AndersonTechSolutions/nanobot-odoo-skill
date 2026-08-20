@@ -120,16 +120,26 @@ class FbMarketplaceOps(BaseOps):
         domain and exact — no scan cap applies.
         """
         return self.search(
-            ["&",
-             ["state", "in", ["listed", "renewal_due"]],
-             "|",
-             ["state", "=", "renewal_due"],
-             "&",
-             ["renewal_date", "!=", False],
-             ["renewal_date", "<=",
-              utc_stamp(timedelta(days=max(within_days, 0)))]],
+            self._renewal_domain(within_days),
             limit=limit, order="renewal_date asc",
         )
+
+    def _renewal_domain(self, within_days: int = 0) -> list:
+        """Domain for the renewal queue — shared by the list and the count.
+
+        Kept as one definition so :meth:`marketplace_summary` counts exactly
+        what :meth:`renewal_due` lists. It is fully server-side, so the count
+        is exact rather than a page length.
+        """
+        return [
+            "&",
+            ["state", "in", ["listed", "renewal_due"]],
+            "|",
+            ["state", "=", "renewal_due"],
+            "&",
+            ["renewal_date", "!=", False],
+            ["renewal_date", "<=", utc_stamp(timedelta(days=max(within_days, 0)))],
+        ]
 
     def stale_listings(self, older_than_days: int = 30, limit: int = 50) -> list[dict]:
         """Live listings that have been up a long time without selling.
@@ -380,8 +390,8 @@ class FbMarketplaceOps(BaseOps):
     def marketplace_summary(self) -> dict:
         """Pipeline counts plus the renewal queue — the daily Marketplace view."""
         counts = {s: self.count([["state", "=", s]]) for s in STATES}
-        due = len(self.renewal_due(limit=200))
-        due_soon = len(self.renewal_due(within_days=3, limit=200))
+        due = self.count(self._renewal_domain())
+        due_soon = self.count(self._renewal_domain(within_days=3))
         stale = self.count_computed(
             [["state", "in", ["listed", "renewal_due"]]],
             lambda r: (r.get("days_listed") or 0) >= 30,

@@ -46,6 +46,9 @@ def _calls(mock_client):
 def _ready(cls, mock_client):
     ops = cls(mock_client)
     ops._available = True
+    # Empty (not None) means "schema unknown" — _fields() then skips
+    # filtering, so the mock's execute_kw sequence stays untouched.
+    ops._model_field_cache = set()
     return ops
 
 
@@ -302,6 +305,28 @@ class TestEbayMessages:
         assert "item_id" in domain
         assert "order_id" not in domain
 
+    def test_messages_for_order_excludes_other_buyers_of_the_same_listing(
+        self, ebay, mock_client
+    ):
+        """item_id identifies the LISTING, not the order.
+
+        A fixed-price listing sells many times, so narrowing on item_id alone
+        mixes other customers' correspondence into an answer about one order.
+        The requested order must be matched exactly, client-side.
+        """
+        mock_client._models.execute_kw.side_effect = [
+            [{"id": 9, "order_id": "12-345", "item_id": "ITEM1"}],  # find_order
+            [                                                       # same listing
+                {"id": 1, "subject": "mine",   "order_id": [9, "12-345"]},
+                {"id": 2, "subject": "theirs", "order_id": [77, "99-999"]},
+                {"id": 3, "subject": "nobody", "order_id": False},
+            ],
+        ]
+        rows = ebay.messages_for_order("12-345")
+        assert [r["id"] for r in rows] == [1], (
+            "only messages belonging to the resolved order may be returned"
+        )
+
     def test_messages_for_order_returns_empty_when_order_unknown(
         self, ebay, mock_client
     ):
@@ -407,25 +432,52 @@ class TestPhotography:
 
     def test_close_session_refuses_to_strand_stock(self, photo, mock_client):
         """Closing over picked-up lines leaves real inventory untracked."""
-        mock_client._models.execute_kw.return_value = [
-            {"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]},
+        mock_client._models.execute_kw.side_effect = [
+            1,                                                    # search_count
+            [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
         ]
         result = photo.close_session(1)
         assert result["closed"] is False
-        assert len(result["stranded_lines"]) == 1
+        assert result["stranded_count"] == 1
         assert "action_end" not in [c[1] for c in _calls(mock_client)]
+
+    def test_close_session_counts_stranded_beyond_the_sample_page(
+        self, photo, mock_client
+    ):
+        """The guard must count server-side, not measure a page it fetched.
+
+        Fetching the first N lines and filtering lets a session with more than
+        N lines hide a stranded one past the window — the guard then sees
+        nothing and closes over real inventory.
+        """
+        mock_client._models.execute_kw.side_effect = [
+            5000,                                                 # search_count
+            [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
+        ]
+        result = photo.close_session(1)
+        assert result["closed"] is False
+        assert result["stranded_count"] == 5000, (
+            "count must come from search_count, not len() of the sample"
+        )
+        counts = [c for c in _calls(mock_client) if c[1] == "search_count"]
+        assert counts, "expected a server-side search_count"
+        domain = counts[0][2][0]
+        assert ["session_id", "=", 1] in domain
+        assert any(c[0] == "state" and c[1] == "in" for c in domain
+                   if isinstance(c, list))
 
     def test_close_session_force_closes_and_still_reports(
         self, photo, mock_client
     ):
         mock_client._models.execute_kw.side_effect = [
+            1,                                                    # search_count
             [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
-            True,
+            True,                                                 # action_end
             [{"id": 1, "name": "PS-1", "state": "closed"}],
         ]
         result = photo.close_session(1, force=True)
         assert result["closed"] is True
-        assert len(result["stranded_lines"]) == 1
+        assert result["stranded_count"] == 1
 
     def test_required_groups_match_the_module(self, photo):
         assert photo.REQUIRED_GROUPS == (

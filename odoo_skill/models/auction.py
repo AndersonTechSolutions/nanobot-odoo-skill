@@ -98,11 +98,17 @@ class AuctionOps(BaseOps):
         late bid, so ``original_end_at`` would under-report what is still open.
         """
         return self.search(
-            [["state", "in", LIVE_STATES],
-             ["current_end_at", "!=", False],
-             ["current_end_at", "<=", utc_stamp(timedelta(hours=within_hours))]],
-            limit=limit, order="current_end_at asc",
+            self._ending_domain(within_hours), limit=limit,
+            order="current_end_at asc",
         )
+
+    def _ending_domain(self, within_hours: int = 6) -> list:
+        """Domain for the closing-soon queue — shared by the list and count."""
+        return [
+            ["state", "in", LIVE_STATES],
+            ["current_end_at", "!=", False],
+            ["current_end_at", "<=", utc_stamp(timedelta(hours=within_hours))],
+        ]
 
     def watching(self, limit: int = 50) -> list[dict]:
         """Lots explicitly marked as being watched."""
@@ -291,7 +297,7 @@ class AuctionOps(BaseOps):
              ["approved_for_bidding", "=", False],
              ["state", "in", LIVE_STATES]]
         )
-        closing = len(self.ending_soon(within_hours=6, limit=200))
+        closing = self.count(self._ending_domain(6))
         errored = self.count([["state", "=", "error"]])
         over = self.count_computed(
             [["approved_for_bidding", "=", True], ["state", "in", LIVE_STATES]],

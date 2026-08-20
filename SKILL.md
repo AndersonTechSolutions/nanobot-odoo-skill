@@ -132,6 +132,14 @@ Any method whose name implies a write (`create`, `update`, `set`, `post`,
 `apply`, `publish`, `schedule`, `run_action`, ...) refuses to run without
 `--confirm`. The refusal happens before any RPC.
 
+Two methods mutate despite reading like queries, and are gated accordingly:
+`ebay.research_comps` calls the eBay Browse API and writes recomputed comp
+aggregates back to the product, and `smart.learn_location` persists an alias to
+`location_vocab.json`. The full classification is frozen in
+`tests/test_write_gate.py::EXPECTED_WRITES` — a name-based heuristic alone
+missed both, so adding any ops method now fails that test until it is
+classified deliberately.
+
 | Namespace | Model | Module | Examples |
 |---|---|---|---|
 | `repairs` | `repair.order` | `atech_repair` | `bench_summary`, `overdue_repairs`, `awaiting_parts`, `find_by_serial`, `create_repair` |
@@ -151,6 +159,27 @@ Any method whose name implies a write (`create`, `update`, `set`, `post`,
 | `auctions` | `auction.lot` | `auction_scrapper_catalog` | `sourcing_summary`, `ending_soon`, `needs_approval`, `over_ceiling`, `approve_bid` |
 | `photography` | `photo.session` | `product_photography` | `studio_summary`, `stranded_lines`, `awaiting_review`, `close_session` |
 | `pc_builds` | `pc.build` | `pc_configurator` | `configurator_summary`, `incompatible_builds`, `add_component`, `create_quotation` |
+
+### Field lists adapt to the database
+
+Optional modules add fields to models that exist everywhere: `helpdesk_repair`
+puts `ticket_id` on `repair.order` and `repair_ids` on `helpdesk.ticket`;
+`atech_messaging` puts `sms_fsm_*` on `project.task`. Those are installed on
+staging and not on production.
+
+Odoo's `read()` rejects an unknown field outright rather than skipping it, so
+one such name in a class's `DETAIL_FIELDS` makes **every** `get()` on that
+namespace raise — while `search`, the queues and the summaries keep working,
+because they use `LIST_FIELDS`. That asymmetry is why it goes unnoticed.
+
+`BaseOps` therefore intersects its declared lists with the fields the database
+actually has (reusing the describe `available()` already performs, so no extra
+round-trip) and logs what it dropped. Declarations stay complete; each database
+gets what it can serve. An explicit `fields=` from a caller is **not** filtered
+— a typo there should surface as an error.
+
+`tests/test_live_fields.py` pins this against a real database; it skips unless
+`ODOO_URL` / `ODOO_API_KEY` are set.
 
 ### Group-gated modules
 

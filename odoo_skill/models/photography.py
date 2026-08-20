@@ -269,6 +269,12 @@ class PhotographyOps(BaseOps):
             self.DIGI_MODEL, [["state", "in", DIGI_ACTIVE]],
             fields=_DIGI_FIELDS, limit=self.COMPUTED_SCAN_CAP, order="id desc",
         )
+        if len(rows) >= self.COMPUTED_SCAN_CAP:
+            logger.warning(
+                "photo.digitization: stuck_digitizations scanned the full "
+                "%d-row cap; a stuck job older than that window is not "
+                "reported.", self.COMPUTED_SCAN_CAP,
+            )
         hits = [r for r in rows if (r.get("attempt_count") or 0) >= min_attempts]
         return hits[:limit]
 
@@ -304,26 +310,40 @@ class PhotographyOps(BaseOps):
         end of a shift); the stranded lines are reported either way and stay
         findable via :meth:`stranded_lines`.
         """
-        off_shelf = self.get_lines(session_id, limit=500)
-        stranded = [r for r in off_shelf if r.get("state") in OFF_SHELF_STATES]
-        if stranded and not force:
+        # Query the off-shelf lines directly instead of fetching a page of
+        # lines and filtering. Fetching the first N and filtering means a
+        # session with more than N lines can hide a stranded one past the
+        # window — the guard then sees nothing and closes over real inventory,
+        # which is the exact failure it exists to prevent.
+        stranded_domain = [
+            ["session_id", "=", session_id],
+            ["state", "in", OFF_SHELF_STATES],
+        ]
+        stranded_count = self.client.search_count(self.LINE_MODEL, stranded_domain)
+        stranded = self.client.search_read(
+            self.LINE_MODEL, stranded_domain, fields=_LINE_FIELDS,
+            limit=200, order="walk_sequence, id",
+        ) if stranded_count else []
+        if stranded_count and not force:
             return {
                 "summary": (
-                    f"Session not closed — {len(stranded)} line(s) are still "
+                    f"Session not closed — {stranded_count} line(s) are still "
                     "off the shelf. Return them first, or call again with "
                     "force=True to close anyway."
                 ),
                 "closed": False,
+                "stranded_count": stranded_count,
                 "stranded_lines": stranded,
             }
         result = self.run_action(session_id, "action_end")
         return {
             "summary": (
                 f"Session {result['record'].get('name')} closed"
-                + (f" — {len(stranded)} line(s) left off-shelf"
-                   if stranded else "")
+                + (f" — {stranded_count} line(s) left off-shelf"
+                   if stranded_count else "")
             ),
             "closed": True,
+            "stranded_count": stranded_count,
             "stranded_lines": stranded,
             "session": result["record"],
         }

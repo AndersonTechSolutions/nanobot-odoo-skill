@@ -34,6 +34,7 @@ def _args_of(mock_client, idx=0):
 def fsm(mock_client):
     ops = FieldServiceOps(mock_client)
     ops._available = True
+    ops._model_field_cache = set()
     return ops
 
 
@@ -41,6 +42,7 @@ def fsm(mock_client):
 def msg(mock_client):
     ops = MessagingOps(mock_client)
     ops._available = True
+    ops._model_field_cache = set()
     return ops
 
 
