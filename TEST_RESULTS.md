@@ -44,8 +44,10 @@ fault. No code changes are needed for any of them:
 | `photography` | API user not in `product_photography.group_photo_user` | grant the group |
 | `auctions` | `auction_scrapper_catalog` not installed on prod (staging-only) | none — degrades cleanly |
 
-Also observed on prod: `atech_order_status.status_page_url` is unset, so
-`order_status.status_link` cannot build customer links until it is configured.
+`atech_order_status.status_page_url` **is** set on prod
+(`https://andersontechsolutions.com/order-status/`) and `order_status.settings()`
+reports `usable: true` there; `status_link()` builds a correct customer URL.
+It is unset on **staging** only, which is a staging config gap, not a prod one.
 
 ### Not covered
 
