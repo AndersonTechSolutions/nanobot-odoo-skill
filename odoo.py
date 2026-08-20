@@ -531,21 +531,52 @@ OPS_NAMESPACES = {
     "consignment": "consignment", "helpdesk": "helpdesk",
     "messaging": "messaging", "field_service": "field_service",
     "ebay": "ebay", "product_drafts": "product_drafts", "itad": "itad",
+    "fb_marketplace": "fb_marketplace", "inbound": "inbound",
+    "order_status": "order_status", "ebay_messages": "ebay_messages",
+    "auctions": "auctions", "photography": "photography",
+    "pc_builds": "pc_builds",
 }
 
 # Method-name prefixes that mutate data. These require --confirm.
+# Method-name classification for the --confirm gate.
+#
+# Two shapes, because bare verbs and verb_object names cannot share one rule.
+# ``assign`` is a write; ``assigned_to`` is a read. ``mark_sold`` is a write;
+# ``marketplace_summary`` is a read. A plain ``startswith("assign")`` /
+# ``("mark")`` gets both of those backwards, so prefixes are
+# underscore-terminated and bare verbs are matched exactly.
+#
+# Getting this wrong in the safe direction (a read demanding --confirm) is
+# merely annoying; getting it wrong the other way lets an agent mutate data
+# with no confirmation, so anything ambiguous belongs in the write set.
+
+#: Bare-verb method names that mutate.
+_WRITE_EXACT = frozenset({
+    "assign", "close", "reopen", "reply", "publish", "unpublish",
+    "schedule", "reschedule", "unschedule", "rescrape", "unlink",
+    # BaseOps.update / BaseOps.create are inherited by every namespace;
+    # "create" is caught by the prefix, bare "update" needs naming here.
+    "update",
+})
+
+#: Underscore-terminated prefixes for verb_object method names that mutate.
 _WRITE_PREFIXES = (
-    "create", "update", "add", "set", "post", "reply", "assign", "schedule",
-    "reschedule", "unschedule", "apply", "publish", "end_", "mark", "record",
-    "run_action",
-    "run_item_action", "run_claim_action", "run_product_action", "delete",
-    "unlink", "smart_create",
+    "create", "update_", "add_", "set_", "post_", "reply_", "assign_",
+    "schedule_", "reschedule_", "unschedule_", "apply_", "publish_",
+    "unpublish_", "end_", "mark_", "record_", "run_", "delete_", "unlink_",
+    "smart_create",
+    # gates that were missing before 3.2 — all of these mutate
+    "cancel_", "start_", "complete_", "submit_", "toggle_", "approve_",
+    # added with the FB Marketplace / inbound / auction / studio connectors
+    "revoke_", "confirm_", "receive_", "flag_", "note_", "send_", "revise_",
+    "log_", "move_", "remove_", "generate_", "reset_", "close_", "save_",
+    "draft_reply", "draft_ai_reply", "find_or_create",
 )
 
 
 def _op_writes(name: str) -> bool:
     """Whether an ops method name looks like it mutates data."""
-    return name.startswith(_WRITE_PREFIXES)
+    return name in _WRITE_EXACT or name.startswith(_WRITE_PREFIXES)
 
 
 def _resolve_op(smart: SmartActionHandler, target: str):

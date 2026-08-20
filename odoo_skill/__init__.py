@@ -56,6 +56,13 @@ from .models import (
     EbayListingOps,
     ProductGuiOps,
     ITADOps,
+    FbMarketplaceOps,
+    InboundOps,
+    OrderStatusOps,
+    EbayMessageOps,
+    AuctionOps,
+    PhotographyOps,
+    PcBuildOps,
 )
 from .smart_actions import SmartActionHandler
 from .sync import OdooChangePoller, OdooWebhookServer
@@ -99,6 +106,13 @@ __all__ = [
     "EbayListingOps",
     "ProductGuiOps",
     "ITADOps",
+    "FbMarketplaceOps",
+    "InboundOps",
+    "OrderStatusOps",
+    "EbayMessageOps",
+    "AuctionOps",
+    "PhotographyOps",
+    "PcBuildOps",
     # Smart Actions
     "SmartActionHandler",
     # Sync

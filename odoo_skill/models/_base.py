@@ -23,6 +23,7 @@ Two rules this base enforces, both of which matter for unattended agents:
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from ..client import OdooClient
@@ -58,6 +59,10 @@ class BaseOps:
     ALLOWED_ACTIONS: frozenset[str] = frozenset()
     #: Default ordering for searches.
     ORDER: str = ""
+    #: Odoo group xmlids the API user needs to reach :attr:`MODEL` at all.
+    #: Set on classes whose module ships restrictive ``ir.model.access`` rows —
+    #: see :meth:`access_check`.
+    REQUIRED_GROUPS: tuple[str, ...] = ()
 
     def __init__(self, client: OdooClient) -> None:
         self.client = client
@@ -89,6 +94,59 @@ class BaseOps:
                 f"Model '{self.MODEL}' is not available on this database. "
                 f"Install the '{self.MODULE or 'providing'}' module first."
             )
+
+    def access_check(self) -> dict:
+        """Report whether the API user can actually read :attr:`MODEL`.
+
+        There are two very different reasons an ops class returns nothing
+        useful, and the raw faults do not distinguish them well: the module is
+        not installed, or it is installed but the API user is outside the
+        groups its ``ir.model.access`` rows name. The second is the one that
+        bites in practice — it is invisible until the first call, it is
+        all-or-nothing rather than a partial read, and its fault text is a
+        wall of group names. Both collapse to one diagnosable answer here,
+        naming the group to grant when that is the problem.
+
+        Subclasses only need to set :attr:`REQUIRED_GROUPS` for the message to
+        name the right groups; the check itself works regardless.
+        """
+        if not self.available():
+            return {
+                "ok": False,
+                "reason": "module_not_installed",
+                "summary": (
+                    f"The '{self.MODULE or 'providing'}' module is not "
+                    f"installed on this database ({self.MODEL} is absent)."
+                ),
+                "model": self.MODEL,
+            }
+        try:
+            self.client.search_count(self.MODEL, [])
+        except OdooError as exc:
+            groups = list(self.REQUIRED_GROUPS)
+            hint = (
+                f" Add it to {groups[0]}"
+                + (" (or one of: " + ", ".join(groups[1:]) + ")"
+                   if len(groups) > 1 else "")
+                + " in Odoo → Settings → Users & Companies → Users."
+                if groups else
+                " Check the ir.model.access rows for this model."
+            )
+            return {
+                "ok": False,
+                "reason": "no_access",
+                "summary": (
+                    f"The API user cannot read {self.MODEL}.{hint}"
+                ),
+                "model": self.MODEL,
+                "required_groups": groups,
+                "error": str(exc)[:300],
+            }
+        return {
+            "ok": True,
+            "summary": f"{self.MODEL} is readable by the API user.",
+            "model": self.MODEL,
+        }
 
     # ── Read ─────────────────────────────────────────────────────────
 
@@ -380,6 +438,22 @@ def _describe_action(action: dict) -> dict:
         "target": action.get("target"),
         "tag": action.get("tag"),
     }
+
+
+def utc_now() -> datetime:
+    """Timezone-aware current UTC time."""
+    return datetime.now(timezone.utc)
+
+
+def utc_stamp(offset: Optional[timedelta] = None) -> str:
+    """An Odoo-format UTC timestamp, optionally shifted by *offset*.
+
+    Odoo stores and compares datetimes as naive UTC strings, so the tzinfo is
+    dropped after the arithmetic — computing in aware UTC and formatting naive
+    is the same wall time without the ``utcnow()`` deprecation.
+    """
+    moment = utc_now() + (offset or timedelta())
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def summarize(rows: Iterable[dict], label: str, empty: str = "none") -> str:

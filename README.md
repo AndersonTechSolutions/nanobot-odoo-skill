@@ -4,7 +4,7 @@ Nanobot skill for Odoo 17 ERP integration. Control your business operations via 
 
 ## Features
 
-- **80+ operations** across 13 Odoo modules
+- **330+ operations** across core Odoo plus 20 AndersonTech custom modules
 - **Smart actions** with fuzzy matching and auto-creation
 - **Zero external dependencies** -- pure Python stdlib (`xmlrpc.client`)
 - **Thread-safe** with retry logic and structured error handling
@@ -21,6 +21,22 @@ Nanobot skill for Odoo 17 ERP integration. Control your business operations via 
 - Manufacturing (BOMs, production orders)
 - Calendar (events, meetings)
 - eCommerce (website orders, product publishing)
+
+### AndersonTech Custom Modules
+
+- Repairs (`atech_repair`) -- bench tickets, parts, labour, QC checklists, OEM shipments
+- RMAs (`atech_rma`) and Warranty (`atech_warranty`)
+- Helpdesk (`atech_helpdesk`) -- tickets, teams, escalations, eBay cases and disputes
+- Messaging (`atech_messaging`) and Field Service (`atech_field_service`)
+- Consignment (`atech_consignment`) and ITAD (`projects-custom`)
+- Facebook Marketplace (`fb_marketplace_lister`) -- listings, renewal queue, AI content
+- Inbound packages (`inbound_tracking`) -- carrier tracking, receipt confirmation
+- Order status (`atech_order_status`) -- customer status links, quote signatures
+- eBay messages (`odoo-ebay-messages`) -- buyer inbox, AI replies, order sync gaps
+- Auction sourcing (`auction_scrapper_catalog`) -- lots, watchlists, bid approval
+- Product photography (`product_photography`) -- studio sessions, AI digitization
+- PC builds (`pc_configurator`) -- component specs, compatibility, quoting
+- eBay listings, product drafts, and the to-do priority matrix
 
 ## Setup
 

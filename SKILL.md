@@ -1,6 +1,6 @@
 ---
 name: odoo
-description: Manage Odoo 17 ERP via XML-RPC — use when the user wants to create, search, or manage sales orders, CRM leads, purchase orders, invoices, inventory, projects, HR, fleet, manufacturing, calendar events, or to-do tasks in their Odoo instance.
+description: Manage Odoo 17 ERP via XML-RPC — use when the user wants to create, search, or manage sales orders, CRM leads, purchase orders, invoices, inventory, projects, HR, fleet, manufacturing, calendar events, to-do tasks, or the AndersonTech custom modules (repairs, RMAs, warranty, helpdesk, Facebook Marketplace listings, inbound packages, eBay messages, auction sourcing, product photography, PC builds) in their Odoo instance.
 metadata: {"nanobot":{"emoji":"🏢","requires":{"bins":["python3"]}}}
 ---
 
@@ -114,8 +114,8 @@ python3 skills/odoo/odoo.py "check stock for Widget X"
 ## Custom Modules (AndersonTech)
 
 The subcommands above cover core Odoo. The AndersonTech custom modules add
-~229 methods, reached through four generic commands rather than one
-subcommand each.
+~330 methods across 20 namespaces, reached through four generic commands
+rather than one subcommand each.
 
 ```bash
 python3 odoo.py list-ops                      # namespaces + whether each module is installed
@@ -144,6 +144,61 @@ Any method whose name implies a write (`create`, `update`, `set`, `post`,
 | `ebay` | `ebay.listing` | `sale_ebay` | `listing_summary`, `research_comps`, `get_pricing`, `apply_suggested_price`, `publish` |
 | `product_drafts` | `quick.product.draft` | `quick_product`, `new_product_gui` | `attention_needed`, `stalled_drafts`, `ai_spend_summary` |
 | `itad` | `tasks` | `projects-custom` | `ops_summary`, `upcoming_pickups`, `sla_at_risk`, `schedule_pickup` |
+| `fb_marketplace` | `fb.marketplace.listing` | `fb_marketplace_lister` | `marketplace_summary`, `renewal_due`, `stale_listings`, `needs_content`, `mark_listed`, `mark_renewed` |
+| `inbound` | `inbound.shipment` | `inbound_tracking` | `dashboard`, `action_queue`, `awaiting_confirmation`, `overdue`, `confirm_receipt`, `receive_line` |
+| `order_status` | `sale.order` | `atech_order_status` | `status_link`, `awaiting_signature`, `confirmation_not_sent`, `settings` |
+| `ebay_messages` | `ebay.message` | `odoo-ebay-messages` | `inbox_summary`, `aging`, `draft_reply`, `send_reply`, `unshipped_orders` |
+| `auctions` | `auction.lot` | `auction_scrapper_catalog` | `sourcing_summary`, `ending_soon`, `needs_approval`, `over_ceiling`, `approve_bid` |
+| `photography` | `photo.session` | `product_photography` | `studio_summary`, `stranded_lines`, `awaiting_review`, `close_session` |
+| `pc_builds` | `pc.build` | `pc_configurator` | `configurator_summary`, `incompatible_builds`, `add_component`, `create_quotation` |
+
+### Group-gated modules
+
+Two modules ship restrictive `ir.model.access` rows, so an API user outside
+their groups gets an access fault on **every** call — there is no partial
+read, and the fault text is a wall of group names. Every ops class inherits
+`access_check()`, which collapses "module missing" and "user lacks the group"
+into one answer naming the group to grant:
+
+```bash
+python3 odoo.py call fb_marketplace.access_check
+python3 odoo.py call photography.access_check
+```
+
+| Namespace | Groups the API user needs |
+|---|---|
+| `fb_marketplace` | `fb_marketplace_lister.group_fb_marketplace_user` (or `…_manager`) |
+| `photography` | `product_photography.group_photo_user` (or `…_manager`) |
+
+`monitor_testing` is deliberately **not** covered by a namespace: it defines
+no `ir.model.access` rows at all, so its models are unreachable over XML-RPC
+regardless of group membership. That is by design (the module is fed by its
+own station API), not a gap to fill.
+
+### Outward-facing actions are two-step
+
+Anything that messages a real customer is split so an agent cannot do it in
+one move. `ebay_messages.draft_reply` generates a draft and sends nothing;
+`send_reply` requires the body to be passed explicitly rather than flushing
+whatever a previous step left in `reply_draft`. The same split already
+governs `helpdesk.draft_ai_reply`.
+
+`order_status.status_link` returns a URL containing a live capability token.
+`status_token` is deliberately absent from the list and detail field sets, so
+listing orders never sprays customer links into a transcript — the link is
+produced one order at a time, on request.
+
+### Refusals that are not errors
+
+Some calls return a refusal envelope (`{"ok": false, "summary": ...}`) rather
+than acting, because acting would produce a quietly wrong record:
+
+| Call | Refuses when | Override |
+|---|---|---|
+| `pc_builds.create_quotation` / `create_build_order` | the build has compatibility errors | `override=True` |
+| `photography.close_session` | lines are still off the shelf | `force=True` |
+| `auctions.approve_bid` | `max_bid` is not positive | none — raises |
+| `ebay_messages.send_reply` | the body is empty | none — raises |
 
 ### Odoo button methods
 
@@ -157,6 +212,27 @@ Each ops class carries an explicit `ALLOWED_ACTIONS` allowlist, because
 `execute_kw` will otherwise invoke *any* public method including `unlink`.
 Deliberately excluded: `quick.product.draft.action_commit` (creates a
 permanent catalogue product) and all ITAD buttons (compliance weight).
+
+### Button methods that return nothing
+
+Odoo's XML-RPC controller serialises responses with `allow_none=False`, and
+that is hardcoded server-side — no client setting changes it. A button method
+that ends without a `return` therefore produces:
+
+```
+TypeError: cannot marshal None unless allow_none is enabled
+```
+
+**The call succeeded and its transaction committed.** Only encoding the reply
+failed. Verified against live Odoo 17: `fb.marketplace.listing.action_mark_listed`
+raises this, and re-reading the record shows `state == 'listed'` with
+`listed_date` stamped.
+
+`OdooClient.execute` matches this one fault narrowly and returns `None`, so
+`run_action` reports `"returned": null` alongside the record's real
+post-action state. Every other fault still raises. Surfacing it as an error
+would be worse than useless — a caller retries an action that already ran, or
+reports a failure that did not happen.
 
 ### Dispatch payloads (one round-trip)
 
@@ -228,6 +304,12 @@ client-side instead, over a bounded scan:
 | `repair.order` | `is_overdue`, `is_awaiting_parts` |
 | `rma.order` | `can_execute_resolutions` |
 | `tasks` (ITAD) | `itad_can_dispatch`, `itad_can_price`, `itad_can_receive`, `sla_days_remaining` |
+| `fb.marketplace.listing` | `days_listed` |
+| `ebay.message` | `order_id` |
+| `pc.build` | `has_speculative_parts` |
+| `photo.session.line` | `minutes_at_studio` |
+| `repair.part.line` | `state`, `qty_received` |
+| `photo.digitization` | `attempt_count` |
 
 **The discriminator is `searchable`, not `store`.** A non-stored field is
 still searchable when it is `related=` to a stored one, or when its

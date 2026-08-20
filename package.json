@@ -1,7 +1,7 @@
 {
   "name": "odoo-erp-connector",
-  "version": "3.0.0",
-  "description": "Odoo 17 ERP integration for nanobot (Sales, CRM, Purchase, Inventory, Projects, HR, Fleet, Manufacturing, To-Do Priority Matrix)",
+  "version": "3.2.0",
+  "description": "Odoo 17 ERP integration for nanobot (core Odoo plus the AndersonTech custom modules: repairs, RMAs, warranty, helpdesk, messaging, field service, consignment, ITAD, FB Marketplace, inbound packages, order status, eBay messages, auction sourcing, photography, PC builds)",
   "author": "AndersonTechSolutions",
   "license": "MIT",
   "keywords": [
@@ -17,7 +17,16 @@
     "manufacturing",
     "todo-matrix",
     "eisenhower",
-    "xml-rpc"
+    "xml-rpc",
+    "repair",
+    "rma",
+    "warranty",
+    "helpdesk",
+    "facebook-marketplace",
+    "ebay",
+    "auction",
+    "photography",
+    "pc-configurator"
   ],
   "engines": {
     "python": ">=3.10"

@@ -28,6 +28,13 @@ from .field_service import FieldServiceOps
 from .ebay_listing import EbayListingOps
 from .product_gui import ProductGuiOps
 from .itad import ITADOps
+from .fb_marketplace import FbMarketplaceOps
+from .inbound import InboundOps
+from .order_status import OrderStatusOps
+from .ebay_messages import EbayMessageOps
+from .auction import AuctionOps
+from .photography import PhotographyOps
+from .pc_build import PcBuildOps
 
 __all__ = [
     "PartnerOps",
@@ -56,4 +63,11 @@ __all__ = [
     "EbayListingOps",
     "ProductGuiOps",
     "ITADOps",
+    "FbMarketplaceOps",
+    "InboundOps",
+    "OrderStatusOps",
+    "EbayMessageOps",
+    "AuctionOps",
+    "PhotographyOps",
+    "PcBuildOps",
 ]

@@ -23,6 +23,17 @@ from .retry import retry_on_connection_error
 logger = logging.getLogger("odoo_skill")
 
 
+#: Odoo's XML-RPC controller dumps responses with ``allow_none=False``, so a
+#: method that returns nothing fails to *encode* — after having run and
+#: committed. Matched narrowly so real faults are never swallowed.
+_NULL_MARSHAL_SIGNATURE = "cannot marshal None unless allow_none is enabled"
+
+
+def _is_null_marshal_fault(exc: xmlrpc.client.Fault) -> bool:
+    """Whether *exc* is Odoo failing to encode a ``None`` return value."""
+    return _NULL_MARSHAL_SIGNATURE in str(getattr(exc, "faultString", "") or "")
+
+
 class OdooClient:
     """Thread-safe Odoo XML-RPC client.
 
@@ -165,7 +176,8 @@ class OdooClient:
             **kwargs: Keyword arguments forwarded to the method.
 
         Returns:
-            Whatever the Odoo method returns.
+            Whatever the Odoo method returns. ``None`` when the method
+            returned nothing — see the note on null marshalling below.
 
         Raises:
             OdooError (or subclass): On any Odoo-side error.
@@ -182,6 +194,29 @@ class OdooClient:
                 kwargs if kwargs else {},
             )
         except xmlrpc.client.Fault as exc:
+            if _is_null_marshal_fault(exc):
+                # The call SUCCEEDED and its transaction COMMITTED. Odoo's
+                # XML-RPC controller serialises the response with
+                # ``allow_none=False`` (hardcoded server-side, so no client
+                # setting can change it), and a button method that ends
+                # without a ``return`` hands it a bare None. The failure is
+                # purely in encoding the reply.
+                #
+                # Verified against a live Odoo 17: calling a returns-nothing
+                # button raises this fault, and re-reading the record
+                # afterwards shows the write applied. Surfacing it as an error
+                # is actively harmful — a caller retries an action that
+                # already ran, or reports a failure that did not happen.
+                #
+                # The match is deliberately narrow: only this exact
+                # marshalling TypeError, never a general Fault. Any other
+                # fault is a real error and still raises.
+                logger.debug(
+                    "%s.%s returned None; Odoo cannot marshal it over "
+                    "XML-RPC. The call committed — treating as success.",
+                    model, method,
+                )
+                return None
             raise classify_error(exc, model=model, method=method) from exc
 
     # ── Convenience wrappers ─────────────────────────────────────────
