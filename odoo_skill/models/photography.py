@@ -309,6 +309,15 @@ class PhotographyOps(BaseOps):
         Pass ``force=True`` to close anyway (sometimes the right call at the
         end of a shift); the stranded lines are reported either way and stay
         findable via :meth:`stranded_lines`.
+
+        **This guard is advisory, not atomic.** The count and the close are
+        separate RPCs, so a line picked up between them is not seen — a real
+        race on a shared studio floor with several people scanning. The count
+        is re-checked immediately before closing, which narrows the window to
+        a single round-trip but cannot remove it; only a server-side
+        constraint in ``product_photography`` could. ``stranded_lines`` is a
+        sample of at most 200 rows and may disagree with ``stranded_count``
+        under concurrent edits; trust the count.
         """
         # Query the off-shelf lines directly instead of fetching a page of
         # lines and filtering. Fetching the first N and filtering means a
@@ -335,6 +344,25 @@ class PhotographyOps(BaseOps):
                 "stranded_count": stranded_count,
                 "stranded_lines": stranded,
             }
+        # Re-check immediately before acting. Cheap, and it catches a line
+        # picked up while the caller was deciding — the common shape of this
+        # race. It does not close the window, only narrows it.
+        if not force:
+            recheck = self.client.search_count(self.LINE_MODEL, stranded_domain)
+            if recheck:
+                return {
+                    "summary": (
+                        f"Session not closed — {recheck} line(s) went off the "
+                        "shelf while this call was in flight. Re-check and "
+                        "retry, or pass force=True."
+                    ),
+                    "closed": False,
+                    "stranded_count": recheck,
+                    "stranded_lines": self.client.search_read(
+                        self.LINE_MODEL, stranded_domain, fields=_LINE_FIELDS,
+                        limit=200, order="walk_sequence, id",
+                    ),
+                }
         result = self.run_action(session_id, "action_end")
         return {
             "summary": (

@@ -205,12 +205,23 @@ class BaseOps:
             return fields
         keep = [f for f in fields if f in real]
         dropped = [f for f in fields if f not in real]
-        if dropped and not self._warned_dropped:
+        if not keep:
+            # Odoo reads ALL fields when `fields` is empty, so returning []
+            # here would quietly turn a narrow read into a full one. If the
+            # declared list matches nothing, the class is pointed at the wrong
+            # model — hand back the declaration and let the read say so.
+            logger.warning(
+                "%s: none of the declared fields exist on this database (%s); "
+                "not filtering.", self.MODEL, ", ".join(fields[:5]),
+            )
+            return fields
+        dropped_note = dropped
+        if dropped_note and not self._warned_dropped:
             self._warned_dropped = True
             logger.info(
                 "%s: dropping field(s) not present on this database: %s "
                 "(an optional module that declares them is not installed here)",
-                self.MODEL, ", ".join(sorted(dropped)),
+                self.MODEL, ", ".join(sorted(dropped_note)),
             )
         return keep
 

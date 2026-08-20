@@ -135,10 +135,14 @@ Any method whose name implies a write (`create`, `update`, `set`, `post`,
 Two methods mutate despite reading like queries, and are gated accordingly:
 `ebay.research_comps` calls the eBay Browse API and writes recomputed comp
 aggregates back to the product, and `smart.learn_location` persists an alias to
-`location_vocab.json`. The full classification is frozen in
-`tests/test_write_gate.py::EXPECTED_WRITES` — a name-based heuristic alone
-missed both, so adding any ops method now fails that test until it is
-classified deliberately.
+`location_vocab.json`.
+
+The full classification is frozen in `tests/method_inventory.json`, which lists
+every `<namespace>.<method>` split into `writes` and `reads`. **Both** lists are
+frozen, not just the writes: with only the writes recorded, a newly added method
+sits in neither set, trips no assertion, and defaults to "read" — which is
+exactly how those two shipped ungated. Adding any ops method now fails
+`test_no_method_is_unclassified` until it is classified deliberately.
 
 | Namespace | Model | Module | Examples |
 |---|---|---|---|
@@ -216,6 +220,31 @@ governs `helpdesk.draft_ai_reply`.
 `status_token` is deliberately absent from the list and detail field sets, so
 listing orders never sprays customer links into a transcript — the link is
 produced one order at a time, on request.
+
+### Guards that are advisory, not atomic
+
+`photography.close_session` refuses to close over off-shelf lines, and
+`ebay_messages.messages_for_order` scopes to one order. Both are enforced by
+this client, not by the database:
+
+* `close_session` counts, then closes, in separate RPCs. A line picked up in
+  between is not seen. The count is re-checked immediately before the close,
+  which narrows the window to one round-trip but cannot remove it — only a
+  server-side constraint in `product_photography` could. `stranded_lines` is a
+  200-row sample and may disagree with `stranded_count` under concurrent
+  edits; trust the count.
+* Order lookups that decide *whose data to return* use
+  `ebay_messages.orders_by_number` (exact), never `find_order` (`ilike`).
+  A substring match authorises every order whose number contains the query —
+  asking about `12-345` would also return `XX12-345YY`, a different customer.
+  Narrowing after a too-wide authorisation does not undo it.
+
+### Cache lifetime
+
+`available()`, the model-field set, and the client's `fields_get` results are
+cached per client instance for the life of the process. A module installed or
+upgraded while a long-lived agent is running will not be picked up until the
+client is recreated.
 
 ### Refusals that are not errors
 

@@ -35,11 +35,18 @@ from odoo_skill.models.photography import PhotographyOps  # noqa: E402
 
 
 def _calls(mock_client):
-    """Every execute_kw call as (model, method, args_vector, kwargs)."""
+    """Every execute_kw call as (model, method, args_vector, odoo_kwargs).
+
+    Note the last element: ``OdooClient.execute`` passes Odoo's keyword dict as
+    the *seventh positional* argument to ``execute_kw`` (db, uid, key, model,
+    method, args, kwargs), not as Python kwargs. Reading ``call[1]`` therefore
+    always yields ``{}`` and silently hides ``fields``/``limit``/``order``.
+    """
     out = []
     for call in mock_client._models.execute_kw.call_args_list:
         args = call[0]
-        out.append((args[3], args[4], args[5], call[1] or {}))
+        odoo_kwargs = args[6] if len(args) > 6 else {}
+        out.append((args[3], args[4], args[5], odoo_kwargs))
     return out
 
 
@@ -305,6 +312,26 @@ class TestEbayMessages:
         assert "item_id" in domain
         assert "order_id" not in domain
 
+    def test_messages_for_order_resolves_the_order_exactly(self, ebay, mock_client):
+        """Authorisation must not use a fuzzy match.
+
+        ``find_order`` is ``ilike``, so resolving "12-345" also matches
+        "XX12-345YY" — a different customer's order. Every matched order was
+        then treated as authorised, and narrowing afterwards cannot undo a
+        too-wide authorisation.
+        """
+        mock_client._models.execute_kw.side_effect = [
+            [{"id": 9, "order_id": "12-345", "item_id": "ITEM1"}],
+            [{"id": 1, "subject": "mine",   "order_id": [9, "12-345"]},
+             {"id": 2, "subject": "theirs", "order_id": [77, "XX12-345YY"]}],
+        ]
+        rows = ebay.messages_for_order("12-345")
+        domain = _calls(mock_client)[0][2][0]
+        assert domain == [["order_id", "=", "12-345"]], (
+            f"order resolution must be exact, got {domain}"
+        )
+        assert [r["id"] for r in rows] == [1]
+
     def test_messages_for_order_excludes_other_buyers_of_the_same_listing(
         self, ebay, mock_client
     ):
@@ -466,6 +493,37 @@ class TestPhotography:
         assert any(c[0] == "state" and c[1] == "in" for c in domain
                    if isinstance(c, list))
 
+    def test_close_session_rechecks_immediately_before_closing(
+        self, photo, mock_client
+    ):
+        """A line picked up mid-call must abort the close.
+
+        The count and the close are separate RPCs, so the guard is advisory,
+        not atomic. Re-checking right before acting narrows the window to one
+        round-trip — it cannot remove it, which the docstring says plainly.
+        """
+        mock_client._models.execute_kw.side_effect = [
+            0,      # initial count: nothing off-shelf
+            1,      # recheck: a line went off-shelf in the meantime
+            [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
+        ]
+        result = photo.close_session(1)
+        assert result["closed"] is False
+        assert result["stranded_count"] == 1
+        assert "went off the shelf while this call was in flight" in result["summary"]
+        assert "action_end" not in [c[1] for c in _calls(mock_client)]
+
+    def test_close_session_closes_when_nothing_is_off_shelf(self, photo, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            0,      # initial count
+            0,      # recheck
+            True,   # action_end
+            [{"id": 1, "name": "PS-1", "state": "closed"}],
+        ]
+        result = photo.close_session(1)
+        assert result["closed"] is True
+        assert result["stranded_count"] == 0
+
     def test_close_session_force_closes_and_still_reports(
         self, photo, mock_client
     ):
@@ -484,3 +542,53 @@ class TestPhotography:
             "product_photography.group_photo_user",
             "product_photography.group_photo_manager",
         )
+
+
+# ── Field filtering against database drift ───────────────────────────
+
+
+class TestFieldFiltering:
+    """BaseOps intersects declared field lists with what the database has.
+
+    Optional modules add fields to shared models (`helpdesk_repair` puts
+    `ticket_id` on repair.order; `atech_messaging` puts `sms_fsm_*` on
+    project.task), and those modules are installed on staging but not
+    production. Odoo's read() rejects an unknown field outright, so one such
+    name breaks every get() on that namespace while the list and summary
+    methods — which use LIST_FIELDS — keep working.
+    """
+
+    def test_fields_absent_from_the_database_are_dropped(self, fb, mock_client):
+        fb._model_field_cache = {"id", "name", "state"}
+        effective = fb._fields(detail=True)
+        assert set(effective) <= {"id", "name", "state"}
+        assert "id" in effective and "name" in effective
+
+    def test_fields_present_in_the_database_are_kept(self, fb, mock_client):
+        fb._model_field_cache = set(fb.DETAIL_FIELDS)
+        assert fb._fields(detail=True) == fb.DETAIL_FIELDS
+
+    def test_unknown_schema_disables_filtering(self, fb, mock_client):
+        """Empty cache means 'schema unknown' — pass declarations through."""
+        fb._model_field_cache = set()
+        assert fb._fields(detail=True) == fb.DETAIL_FIELDS
+
+    def test_never_returns_an_empty_field_list(self, fb, mock_client):
+        """Odoo reads ALL fields when `fields` is empty.
+
+        Filtering down to nothing would silently turn a narrow read into a
+        full one, so a total mismatch falls back to the declaration and lets
+        the read raise instead.
+        """
+        fb._model_field_cache = {"totally", "different", "model"}
+        effective = fb._fields(detail=True)
+        assert effective == fb.DETAIL_FIELDS
+        assert effective, "must never hand Odoo an empty field list"
+
+    def test_explicit_caller_fields_are_not_filtered(self, fb, mock_client):
+        """A typo in an explicit fields= should error, not be swallowed."""
+        fb._model_field_cache = {"id", "name"}
+        mock_client._models.execute_kw.return_value = []
+        fb.search([], fields=["id", "name", "definitely_not_a_field"])
+        _, _, _, odoo_kwargs = _calls(mock_client)[0]
+        assert "definitely_not_a_field" in odoo_kwargs["fields"]

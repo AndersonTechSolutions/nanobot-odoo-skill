@@ -164,7 +164,7 @@ class EbayMessageOps(BaseOps):
         one order. So ``order_id`` is read back per record and matched
         exactly, client-side, over the narrowed set.
         """
-        orders = self.find_order(order_ref, limit=5)
+        orders = self.orders_by_number(order_ref)
         item_ids = [o["item_id"] for o in orders if o.get("item_id")]
         order_ids = {o["id"] for o in orders}
         if not item_ids:
@@ -212,8 +212,26 @@ class EbayMessageOps(BaseOps):
 
     # ── Orders ───────────────────────────────────────────────────────
 
+    def orders_by_number(self, order_ref: str) -> list[dict]:
+        """Resolve an eBay order number **exactly**.
+
+        Use this, not :meth:`find_order`, whenever the result authorises
+        access to something. ``find_order`` is an ``ilike`` search built for
+        human lookup, and substring matching is the wrong primitive for
+        deciding whose data to return.
+        """
+        self._require()
+        return self.client.search_read(
+            self.ORDER_MODEL, [["order_id", "=", order_ref]],
+            fields=_ORDER_FIELDS, limit=10, order="created_time desc",
+        )
+
     def find_order(self, order_ref: str, limit: int = 10) -> list[dict]:
-        """Locate eBay orders by order number, item number, or buyer."""
+        """Locate eBay orders by order number, item number, or buyer.
+
+        Fuzzy (``ilike``) — for human lookup only. Never use the result to
+        decide what data a caller may see; see :meth:`orders_by_number`.
+        """
         self._require()
         return self.client.search_read(
             self.ORDER_MODEL,

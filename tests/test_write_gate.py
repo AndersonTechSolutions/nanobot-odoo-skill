@@ -12,13 +12,14 @@ a bare ``startswith("mark")`` classified it as a write, while ``assigned_to``
 inherited by *every* namespace — was not gated at all once the prefixes were
 underscore-terminated. Both directions are asserted below.
 
-The sweep at the end walks every method actually exposed on every namespace and
-compares it against a frozen inventory, so a newly added method has to be
-classified explicitly rather than defaulting to "read" unnoticed. That
-inventory replaced a substring heuristic which had itself missed two
-side-effecting reads — see EXPECTED_WRITES.
+The sweep at the end compares every exposed method against a frozen,
+namespace-qualified inventory in ``tests/method_inventory.json``. BOTH reads
+and writes are frozen: freezing only the writes lets a new method sit in
+neither set and default to "read" without failing anything, which is how
+``research_comps`` and ``learn_location`` shipped ungated.
 """
 
+import json
 import os
 import sys
 
@@ -86,147 +87,18 @@ def test_bare_verb_and_verb_object_are_both_covered():
     assert odoo._op_writes("marketplace_summary") is False
 
 
-#: Frozen inventory of every method the CLI exposes that mutates data.
-#:
-#: A substring heuristic cannot police this. The previous version of the sweep
-#: guessed at "mutating" names and so missed `research_comps` (calls the eBay
-#: Browse API and writes recomputed comp aggregates back to the product) and
-#: `learn_location` (persists an alias to location_vocab.json) — both of which
-#: read like queries and ran ungated.
-#:
-#: So the expected set is written down instead of inferred. Adding any method
-#: to an ops class fails the test below until it is classified here, which is
-#: the point: the unsafe default is "read", and that default must never be
-#: reached by accident.
-EXPECTED_WRITES = {
-    "add_attachment",
-    "add_checklist_item",
-    "add_component",
-    "add_image",
-    "add_item",
-    "add_line",
-    "add_part",
-    "add_product",
-    "apply_suggested_price",
-    "approve_bid",
-    "approve_leave",
-    "assign",
-    "assign_task",
-    "cancel_order",
-    "cancel_po",
-    "cancel_task",
-    "close",
-    "close_session",
-    "complete_task",
-    "confirm_order",
-    "confirm_po",
-    "confirm_receipt",
-    "create",
-    "create_build",
-    "create_build_order",
-    "create_claim",
-    "create_customer",
-    "create_department",
-    "create_employee",
-    "create_event",
-    "create_expense",
-    "create_invoice",
-    "create_lead",
-    "create_leave_request",
-    "create_listing",
-    "create_opportunity",
-    "create_order",
-    "create_project",
-    "create_purchase_order",
-    "create_quotation",
-    "create_registration",
-    "create_repair",
-    "create_rma",
-    "create_session",
-    "create_shipment",
-    "create_task",
-    "create_ticket",
-    "delete_attachment",
-    "delete_customer",
-    "delete_event",
-    "draft_ai_reply",
-    "draft_reply",
-    "end_listing",
-    "find_or_create_partner",
-    "find_or_create_product",
-    "flag_exception",
-    "generate_content",
-    "learn_location",
-    "log_oem_shipment",
-    "log_time",
-    "log_timesheet",
-    "mark_listed",
-    "mark_lost",
-    "mark_read",
-    "mark_renewed",
-    "mark_sold",
-    "mark_spam",
-    "mark_won",
-    "move_stage",
-    "note_line",
-    "post_customer_update",
-    "post_invoice",
-    "publish",
-    "receive_line",
-    "receive_oem_shipment",
-    "receive_products",
-    "record_tracking",
-    "remove_component",
-    "reopen",
-    "reply",
-    "reschedule",
-    "rescrape",
-    "research_comps",
-    "reset_draft",
-    "reset_task",
-    "revise_draft",
-    "revoke_approval",
-    "run_action",
-    "run_claim_action",
-    "run_item_action",
-    "run_product_action",
-    "save_as_catalog",
-    "schedule",
-    "schedule_job",
-    "schedule_pickup",
-    "send_reply",
-    "set_check",
-    "set_diagnosis",
-    "set_dismissed",
-    "set_estimates",
-    "set_line_resolution",
-    "set_notes",
-    "set_price",
-    "set_pricing",
-    "set_task_stage",
-    "set_watching",
-    "smart_create_employee",
-    "smart_create_event",
-    "smart_create_invoice",
-    "smart_create_lead",
-    "smart_create_purchase",
-    "smart_create_quotation",
-    "smart_create_task",
-    "smart_create_todo",
-    "start_task",
-    "submit_expense",
-    "toggle_checklist_item",
-    "unschedule_job",
-    "update",
-    "update_customer",
-    "update_employee",
-    "update_event",
-    "update_task",
-}
+#: Frozen inventory, namespace-qualified, in tests/method_inventory.json.
+INVENTORY_PATH = os.path.join(os.path.dirname(__file__), "method_inventory.json")
+
+
+def _load_inventory():
+    with open(INVENTORY_PATH) as fh:
+        data = json.load(fh)
+    return set(data["writes"]), set(data["reads"])
 
 
 def _all_exposed_methods():
-    """Every public callable reachable as `<namespace>.<method>` from the CLI."""
+    """Every public callable reachable as ``<namespace>.<method>`` from the CLI."""
     smart = SmartActionHandler(OdooClient(config=OdooConfig(
         url="https://test.odoo.com", db="d", username="u", api_key="k",
     )))
@@ -236,51 +108,69 @@ def _all_exposed_methods():
         for name in sorted(dir(obj)):
             if name.startswith("_") or not callable(getattr(obj, name, None)):
                 continue
-            out.add(name)
+            out.add(f"{ns}.{name}")
     return out
 
 
-def test_write_classification_matches_the_frozen_inventory():
-    """Every exposed method is classified exactly as recorded — no drift.
+def test_no_method_is_unclassified():
+    """Every exposed method must appear in the inventory — reads included.
 
-    Fails in both directions on purpose:
-
-    * a method newly classified as a write but absent from EXPECTED_WRITES
-      (usually fine — add it), and
-    * a method in EXPECTED_WRITES that no longer classifies as a write, which
-      means a mutation slipped through the gate.
+    This is the assertion that matters, and the reason BOTH lists are frozen.
+    An earlier version froze only the writes: a newly added method then sat in
+    neither set, tripped no assertion, and defaulted to "read" — silently
+    ungated. That is precisely how ``research_comps`` (writes recomputed comp
+    aggregates) and ``learn_location`` (persists an alias file) shipped
+    unconfirmed. Freezing the reads too makes "I forgot to classify it" a test
+    failure instead of a silent grant.
     """
-    exposed = _all_exposed_methods()
-    actual = {m for m in exposed if odoo._op_writes(m)}
-
-    newly_gated = sorted(actual - EXPECTED_WRITES)
-    no_longer_gated = sorted(EXPECTED_WRITES & exposed - actual)
-
-    assert not no_longer_gated, (
-        "these mutating methods are NO LONGER gated behind --confirm: "
-        + ", ".join(no_longer_gated)
+    writes, reads = _load_inventory()
+    unclassified = sorted(_all_exposed_methods() - writes - reads)
+    assert not unclassified, (
+        "these methods are in neither list in tests/method_inventory.json, so "
+        "they default to 'read' and run without --confirm. Classify each one: "
+        + ", ".join(unclassified)
     )
-    assert not newly_gated, (
-        "these methods are now gated but are not in EXPECTED_WRITES — if they "
-        "mutate, add them; if they are reads, the classifier over-matched: "
-        + ", ".join(newly_gated)
+
+
+def test_classification_matches_the_inventory():
+    """The classifier must agree with the inventory, in both directions."""
+    writes, reads = _load_inventory()
+    exposed = _all_exposed_methods()
+
+    should_write_but_does_not = sorted(
+        q for q in writes & exposed if not odoo._op_writes(q.split(".", 1)[1])
+    )
+    should_read_but_gated = sorted(
+        q for q in reads & exposed if odoo._op_writes(q.split(".", 1)[1])
+    )
+
+    assert not should_write_but_does_not, (
+        "these mutating methods are NO LONGER gated behind --confirm: "
+        + ", ".join(should_write_but_does_not)
+    )
+    assert not should_read_but_gated, (
+        "these reads are now gated behind --confirm: "
+        + ", ".join(should_read_but_gated)
     )
 
 
 def test_inventory_has_no_stale_entries():
-    """EXPECTED_WRITES must not name methods that no longer exist."""
-    stale = sorted(EXPECTED_WRITES - _all_exposed_methods())
+    """The inventory must not name methods that no longer exist."""
+    writes, reads = _load_inventory()
+    stale = sorted((writes | reads) - _all_exposed_methods())
     assert not stale, (
-        "EXPECTED_WRITES names method(s) no longer exposed: " + ", ".join(stale)
+        "tests/method_inventory.json names method(s) no longer exposed: "
+        + ", ".join(stale)
     )
 
 
 def test_known_side_effecting_reads_are_gated():
     """Methods that look like queries but mutate — the ones that got missed."""
-    for name in ("research_comps", "learn_location"):
-        assert name in EXPECTED_WRITES, f"{name} must be inventoried as a write"
-        assert odoo._op_writes(name) is True, (
-            f"{name} mutates despite its name and must require --confirm"
+    writes, _ = _load_inventory()
+    for qualified in ("ebay.research_comps", "smart.learn_location"):
+        assert qualified in writes, f"{qualified} must be inventoried as a write"
+        assert odoo._op_writes(qualified.split(".", 1)[1]) is True, (
+            f"{qualified} mutates despite its name and must require --confirm"
         )
 
 
