@@ -509,7 +509,7 @@ def cmd_delete_record(args):
 #
 # The subcommands above cover the core Odoo workflows with one handler each.
 # That does not scale to the custom modules — repair, RMA, warranty,
-# consignment, helpdesk, messaging, field service, eBay listings, product
+# consignment, helpdesk, field service, eBay listings, product
 # drafts and ITAD add ~229 methods between them, and hand-writing a
 # subcommand per method would be unmaintainable.
 #
@@ -529,11 +529,11 @@ OPS_NAMESPACES = {
     # AndersonTech custom modules
     "repairs": "repairs", "rmas": "rmas", "warranty": "warranty",
     "consignment": "consignment", "helpdesk": "helpdesk",
-    "messaging": "messaging", "field_service": "field_service",
+    "field_service": "field_service",
     "ebay": "ebay", "product_drafts": "product_drafts", "itad": "itad",
     "fb_marketplace": "fb_marketplace", "inbound": "inbound",
     "order_status": "order_status", "ebay_messages": "ebay_messages",
-    "auctions": "auctions", "photography": "photography",
+    "photography": "photography",
     "pc_builds": "pc_builds",
 }
 
@@ -567,7 +567,7 @@ _WRITE_PREFIXES = (
     "smart_create",
     # gates that were missing before 3.2 — all of these mutate
     "cancel_", "start_", "complete_", "submit_", "toggle_", "approve_",
-    # added with the FB Marketplace / inbound / auction / studio connectors
+    # added with the FB Marketplace / inbound / studio connectors
     "revoke_", "confirm_", "receive_", "flag_", "note_", "send_", "revise_",
     "log_", "move_", "remove_", "generate_", "reset_", "close_", "save_",
     "draft_reply", "draft_ai_reply", "find_or_create",

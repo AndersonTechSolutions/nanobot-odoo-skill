@@ -1,6 +1,6 @@
 ---
 name: odoo
-description: Manage Odoo 17 ERP via XML-RPC — use when the user wants to create, search, or manage sales orders, CRM leads, purchase orders, invoices, inventory, projects, HR, fleet, manufacturing, calendar events, to-do tasks, or the AndersonTech custom modules (repairs, RMAs, warranty, helpdesk, Facebook Marketplace listings, inbound packages, eBay messages, auction sourcing, product photography, PC builds) in their Odoo instance.
+description: Manage Odoo 17 ERP via XML-RPC — use when the user wants to create, search, or manage sales orders, CRM leads, purchase orders, invoices, inventory, projects, HR, fleet, manufacturing, calendar events, to-do tasks, or the AndersonTech custom modules (repairs, RMAs, warranty, helpdesk, Facebook Marketplace listings, inbound packages, eBay messages, product photography, PC builds) in their Odoo instance.
 metadata: {"nanobot":{"emoji":"🏢","requires":{"bins":["python3"]}}}
 ---
 
@@ -114,7 +114,7 @@ python3 skills/odoo/odoo.py "check stock for Widget X"
 ## Custom Modules (AndersonTech)
 
 The subcommands above cover core Odoo. The AndersonTech custom modules add
-~330 methods across 20 namespaces, reached through four generic commands
+~420 methods across 15 namespaces, reached through four generic commands
 rather than one subcommand each.
 
 ```bash
@@ -151,7 +151,6 @@ exactly how those two shipped ungated. Adding any ops method now fails
 | `warranty` | `warranty.registration` | `atech_warranty` | `check_coverage`, `expiring_soon`, `open_claims`, `create_claim` |
 | `consignment` | `consignment.order` | `atech_consignment` | `pipeline_summary`, `items_awaiting_payout`, `set_pricing` |
 | `helpdesk` | `helpdesk.ticket` | `atech_helpdesk` | `desk_summary`, `ebay_action_needed`, `draft_ai_reply` |
-| `messaging` | `atech.conversation` | `atech_messaging` | `inbox`, `inbox_summary`, `unread`, `get_thread`, `reply` |
 | `field_service` | `project.task` (FSM) | `atech_field_service` | `dispatch_board`, `schedule_job`, `unschedule_job`, `unscheduled_jobs` |
 | `ebay` | `ebay.listing` | `sale_ebay` | `listing_summary`, `research_comps`, `get_pricing`, `apply_suggested_price`, `publish` |
 | `product_drafts` | `quick.product.draft` | `quick_product`, `new_product_gui` | `attention_needed`, `stalled_drafts`, `ai_spend_summary` |
@@ -160,16 +159,14 @@ exactly how those two shipped ungated. Adding any ops method now fails
 | `inbound` | `inbound.shipment` | `inbound_tracking` | `dashboard`, `action_queue`, `awaiting_confirmation`, `overdue`, `confirm_receipt`, `receive_line` |
 | `order_status` | `sale.order` | `atech_order_status` | `status_link`, `awaiting_signature`, `confirmation_not_sent`, `settings` |
 | `ebay_messages` | `ebay.message` | `odoo-ebay-messages` | `inbox_summary`, `aging`, `draft_reply`, `send_reply`, `unshipped_orders` |
-| `auctions` | `auction.lot` | `auction_scrapper_catalog` | `sourcing_summary`, `ending_soon`, `needs_approval`, `over_ceiling`, `approve_bid` |
 | `photography` | `photo.session` | `product_photography` | `studio_summary`, `stranded_lines`, `awaiting_review`, `close_session` |
 | `pc_builds` | `pc.build` | `pc_configurator` | `configurator_summary`, `incompatible_builds`, `add_component`, `create_quotation` |
 
 ### Field lists adapt to the database
 
 Optional modules add fields to models that exist everywhere: `helpdesk_repair`
-puts `ticket_id` on `repair.order` and `repair_ids` on `helpdesk.ticket`;
-`atech_messaging` puts `sms_fsm_*` on `project.task`. Those are installed on
-staging and not on production.
+puts `ticket_id` on `repair.order` and `repair_ids` on `helpdesk.ticket`.
+Those are installed on staging and not on production.
 
 Odoo's `read()` rejects an unknown field outright rather than skipping it, so
 one such name in a class's `DETAIL_FIELDS` makes **every** `get()` on that
@@ -221,18 +218,30 @@ governs `helpdesk.draft_ai_reply`.
 listing orders never sprays customer links into a transcript — the link is
 produced one order at a time, on request.
 
+### Close-session guard: atomic on the server, advisory as a fallback
+
+`photography.close_session` refuses to close a session over off-shelf lines
+(picked-up or shot stock that would be stranded in the studio):
+
+* It delegates to the module method `photo.session.action_end_guarded`, which
+  counts off-shelf lines and closes in **one transaction behind a row lock**.
+  Every transition that moves a line off-shelf writes that same session row
+  (the stored line-state counters) and refuses on a closed session, so a line
+  picked up mid-close is either counted (the close refuses) or blocked (the
+  pickup refuses). The race is closed on the server, not merely narrowed.
+  Requires `product_photography` ≥ 17.0.5.1.0.
+* On an older database that lacks the method, `close_session` falls back to an
+  **advisory** client-side guard (`_close_session_advisory`): it counts, then
+  closes, in separate RPCs, re-checking immediately before the close. That
+  narrows the window to one round-trip but cannot remove it. `stranded_lines`
+  is a 200-row sample and may disagree with `stranded_count` under concurrent
+  edits; trust the count.
+
 ### Guards that are advisory, not atomic
 
-`photography.close_session` refuses to close over off-shelf lines, and
-`ebay_messages.messages_for_order` scopes to one order. Both are enforced by
-this client, not by the database:
+`ebay_messages.messages_for_order` scopes to one order, enforced by this
+client, not the database:
 
-* `close_session` counts, then closes, in separate RPCs. A line picked up in
-  between is not seen. The count is re-checked immediately before the close,
-  which narrows the window to one round-trip but cannot remove it — only a
-  server-side constraint in `product_photography` could. `stranded_lines` is a
-  200-row sample and may disagree with `stranded_count` under concurrent
-  edits; trust the count.
 * Order lookups that decide *whose data to return* use
   `ebay_messages.orders_by_number` (exact), never `find_order` (`ilike`).
   A substring match authorises every order whose number contains the query —
@@ -255,7 +264,6 @@ than acting, because acting would produce a quietly wrong record:
 |---|---|---|
 | `pc_builds.create_quotation` / `create_build_order` | the build has compatibility errors | `override=True` |
 | `photography.close_session` | lines are still off the shelf | `force=True` |
-| `auctions.approve_bid` | `max_bid` is not positive | none — raises |
 | `ebay_messages.send_reply` | the body is empty | none — raises |
 
 ### Odoo button methods
@@ -294,21 +302,13 @@ reports a failure that did not happen.
 
 ### Dispatch payloads (one round-trip)
 
-Two ops wrap the same model-level methods the Odoo UIs call, returning a
-whole working surface in a single request instead of a dozen searches:
+`field_service.dispatch_board` wraps the same model-level method the Odoo UI
+calls, returning a whole working surface in a single request instead of a dozen
+searches:
 
 ```bash
-python3 odoo.py call messaging.inbox --args '{"view": "unassigned"}'
-python3 odoo.py call messaging.inbox --args '{"search": "dell latitude"}'
 python3 odoo.py call field_service.dispatch_board --args '{"days": 7}'
 ```
-
-`messaging.inbox` returns conversation cards, counts across every lane, the
-agent roster and canned responses. `view` is a *lane*, not a status —
-`mine` and `unassigned` cut across statuses, and `mine` resolves against the
-**authenticated API user**, not whoever the agent is acting for. A `search`
-spans all statuses and overrides `view`; queries under 2 characters are
-ignored by the module to avoid a full message-body scan.
 
 `field_service.dispatch_board` returns technicians, day columns, the
 unscheduled backlog and scheduled cards, timezone-resolved. It requires the

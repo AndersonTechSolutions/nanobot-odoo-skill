@@ -52,9 +52,9 @@ pytestmark = pytest.mark.skipif(
 #: LIST_FIELDS/DETAIL_FIELDS. It has no field-list contract for this to check.
 OPS_CLASSES = [
     M.FbMarketplaceOps, M.InboundOps, M.OrderStatusOps, M.EbayMessageOps,
-    M.AuctionOps, M.PhotographyOps, M.PcBuildOps,
+    M.PhotographyOps, M.PcBuildOps,
     M.RepairOps, M.HelpdeskOps, M.RMAOps, M.WarrantyOps, M.ConsignmentOps,
-    M.MessagingOps, M.FieldServiceOps, M.EbayListingOps, M.ProductGuiOps,
+    M.FieldServiceOps, M.EbayListingOps, M.ProductGuiOps,
     M.ITADOps,
 ]
 

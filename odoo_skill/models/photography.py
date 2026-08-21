@@ -35,8 +35,26 @@ import logging
 from typing import Any, Optional
 
 from ._base import BaseOps
+from ..errors import OdooError
 
 logger = logging.getLogger("odoo_skill")
+
+
+def _is_missing_method(exc: Exception, method: str) -> bool:
+    """True if *exc* is Odoo complaining that *method* does not exist.
+
+    Distinguishes "this database's module is too old to have the method" — the
+    signal to fall back — from a real error like an access fault, which must
+    propagate. Odoo raises an ``AttributeError``-flavoured fault for an unknown
+    method; match on that plus the method name so an unrelated fault that
+    merely mentions the name does not trigger a silent fallback.
+    """
+    text = str(exc)
+    return method in text and (
+        "has no attribute" in text
+        or "AttributeError" in text
+        or "is not a valid action on" in text
+    )
 
 _LIST_FIELDS = [
     "id", "name", "user_id", "state", "start_date", "close_date",
@@ -310,14 +328,67 @@ class PhotographyOps(BaseOps):
         end of a shift); the stranded lines are reported either way and stay
         findable via :meth:`stranded_lines`.
 
-        **This guard is advisory, not atomic.** The count and the close are
-        separate RPCs, so a line picked up between them is not seen — a real
-        race on a shared studio floor with several people scanning. The count
-        is re-checked immediately before closing, which narrows the window to
-        a single round-trip but cannot remove it; only a server-side
-        constraint in ``product_photography`` could. ``stranded_lines`` is a
-        sample of at most 200 rows and may disagree with ``stranded_count``
-        under concurrent edits; trust the count.
+        The close is delegated to the module's ``action_end_guarded``, which
+        counts off-shelf lines and closes in **one transaction behind a row
+        lock**, so a line picked up mid-close is either seen (the close
+        refuses) or blocked (the pickup refuses on the now-closed session) —
+        the race is closed on the server, not merely narrowed. On a database
+        whose ``product_photography`` predates that method this falls back to
+        :meth:`_close_session_advisory`, a two-RPC client-side guard that
+        narrows the window but cannot remove it.
+        """
+        self._require()
+        try:
+            outcome = self.client.execute(
+                self.MODEL, "action_end_guarded", [session_id], force=force
+            )
+        except OdooError as exc:
+            if not _is_missing_method(exc, "action_end_guarded"):
+                raise
+            logger.info(
+                "photo.session.action_end_guarded is not available on this "
+                "database; using the advisory client-side close for session "
+                "%s. Upgrade product_photography to close the race.",
+                session_id,
+            )
+            return self._close_session_advisory(session_id, force=force)
+
+        stranded = outcome.get("stranded_lines") or []
+        stranded_count = int(outcome.get("stranded_count") or 0)
+        if not outcome.get("closed"):
+            return {
+                "summary": outcome.get("summary") or (
+                    f"Session not closed — {stranded_count} line(s) are still "
+                    "off the shelf. Return them first, or call again with "
+                    "force=True to close anyway."
+                ),
+                "closed": False,
+                "stranded_count": stranded_count,
+                "stranded_lines": stranded,
+            }
+        record = self.get(session_id)
+        return {
+            "summary": outcome.get("summary") or (
+                f"Session {record.get('name')} closed"
+                + (f" — {stranded_count} line(s) left off-shelf"
+                   if stranded_count else "")
+            ),
+            "closed": True,
+            "stranded_count": stranded_count,
+            "stranded_lines": stranded,
+            "session": record,
+        }
+
+    def _close_session_advisory(self, session_id: int, force: bool = False) -> dict:
+        """Client-side close guard for databases without ``action_end_guarded``.
+
+        **Advisory, not atomic.** The count and the close are separate RPCs, so
+        a line picked up between them is not seen — a real race on a shared
+        studio floor with several people scanning. The count is re-checked
+        immediately before closing, which narrows the window to a single
+        round-trip but cannot remove it; only the server-side guard can.
+        ``stranded_lines`` is a sample of at most 200 rows and may disagree
+        with ``stranded_count`` under concurrent edits; trust the count.
         """
         # Query the off-shelf lines directly instead of fetching a page of
         # lines and filtering. Fetching the first N and filtering means a

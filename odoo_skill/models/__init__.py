@@ -23,7 +23,6 @@ from .rma import RMAOps
 from .warranty import WarrantyOps
 from .consignment import ConsignmentOps
 from .helpdesk import HelpdeskOps
-from .messaging import MessagingOps
 from .field_service import FieldServiceOps
 from .ebay_listing import EbayListingOps
 from .product_gui import ProductGuiOps
@@ -32,7 +31,6 @@ from .fb_marketplace import FbMarketplaceOps
 from .inbound import InboundOps
 from .order_status import OrderStatusOps
 from .ebay_messages import EbayMessageOps
-from .auction import AuctionOps
 from .photography import PhotographyOps
 from .pc_build import PcBuildOps
 
@@ -58,7 +56,6 @@ __all__ = [
     "WarrantyOps",
     "ConsignmentOps",
     "HelpdeskOps",
-    "MessagingOps",
     "FieldServiceOps",
     "EbayListingOps",
     "ProductGuiOps",
@@ -67,7 +64,6 @@ __all__ = [
     "InboundOps",
     "OrderStatusOps",
     "EbayMessageOps",
-    "AuctionOps",
     "PhotographyOps",
     "PcBuildOps",
 ]

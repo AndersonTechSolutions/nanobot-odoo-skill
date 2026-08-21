@@ -25,7 +25,7 @@ SKILL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if SKILL_DIR not in sys.path:
     sys.path.insert(0, SKILL_DIR)
 
-from odoo_skill.models.auction import AuctionOps  # noqa: E402
+from odoo_skill.errors import OdooError  # noqa: E402
 from odoo_skill.models.ebay_messages import EbayMessageOps  # noqa: E402
 from odoo_skill.models.fb_marketplace import FbMarketplaceOps  # noqa: E402
 from odoo_skill.models.inbound import InboundOps  # noqa: E402
@@ -67,11 +67,6 @@ def fb(mock_client):
 @pytest.fixture()
 def inbound(mock_client):
     return _ready(InboundOps, mock_client)
-
-
-@pytest.fixture()
-def auction(mock_client):
-    return _ready(AuctionOps, mock_client)
 
 
 @pytest.fixture()
@@ -224,51 +219,6 @@ class TestInbound:
     def test_create_shipment_rejects_an_unknown_carrier(self, inbound):
         with pytest.raises(ValueError, match="carrier must be one of"):
             inbound.create_shipment("1Z999", carrier="royalmail")
-
-
-# ── Auction sourcing ─────────────────────────────────────────────────
-
-
-class TestAuction:
-
-    def test_approve_bid_requires_a_positive_ceiling(self, auction):
-        with pytest.raises(ValueError, match="positive ceiling"):
-            auction.approve_bid(1, 0)
-
-    def test_approve_bid_writes_flag_ceiling_and_watch_together(
-        self, auction, mock_client
-    ):
-        mock_client._models.execute_kw.side_effect = [
-            True,
-            [{"id": 1, "title": "Lot 5", "current_bid": 10.0,
-              "approved_max_bid": 500.0}],
-        ]
-        auction.approve_bid(1, 500.0)
-        values = [c for c in _calls(mock_client) if c[1] == "write"][0][2][1]
-        assert values["approved_for_bidding"] is True
-        assert values["approved_max_bid"] == 500.0
-        assert values["watchlist_state"] == "watching"
-
-    def test_approve_bid_warns_when_already_over_ceiling(
-        self, auction, mock_client
-    ):
-        mock_client._models.execute_kw.side_effect = [
-            True,
-            [{"id": 1, "title": "Lot 5", "current_bid": 900.0,
-              "approved_max_bid": 500.0}],
-        ]
-        result = auction.approve_bid(1, 500.0)
-        assert "already at or above" in result["summary"]
-
-    def test_ending_soon_reads_current_end_not_original(
-        self, auction, mock_client
-    ):
-        """Soft close moves the deadline; original_end_at under-reports."""
-        mock_client._models.execute_kw.return_value = []
-        auction.ending_soon(within_hours=6)
-        flat = str(_calls(mock_client)[0][2][0])
-        assert "current_end_at" in flat
-        assert "original_end_at" not in flat
 
 
 # ── eBay messages ────────────────────────────────────────────────────
@@ -455,11 +405,85 @@ class TestOrderStatus:
 # ── Photography ──────────────────────────────────────────────────────
 
 
-class TestPhotography:
+#: An Odoo fault for a method the installed module is too old to have. The
+#: skill uses exactly this shape to decide whether to fall back to the advisory
+#: client-side close, so the tests reproduce it rather than a hand-waved string.
+def _missing_method_fault(method="action_end_guarded"):
+    import xmlrpc.client
+    return xmlrpc.client.Fault(
+        1,
+        "Traceback (most recent call last):\n"
+        f"AttributeError: 'photo.session' object has no attribute '{method}'",
+    )
 
-    def test_close_session_refuses_to_strand_stock(self, photo, mock_client):
-        """Closing over picked-up lines leaves real inventory untracked."""
+
+class TestPhotography:
+    """close_session's primary path is the module's atomic action_end_guarded;
+    the advisory two-RPC guard is a fallback for databases without it."""
+
+    # ── Primary path: the server's atomic guard ──────────────────────
+
+    def test_close_session_uses_the_atomic_server_guard(self, photo, mock_client):
+        """The single authoritative call is action_end_guarded, not a client
+        count-then-close dance."""
         mock_client._models.execute_kw.side_effect = [
+            {"closed": False, "stranded_count": 1,
+             "stranded_lines": [{"id": 1, "state": "picked_up"}],
+             "summary": "Session not closed — 1 line(s) are still off the shelf."},
+        ]
+        result = photo.close_session(1)
+        assert result["closed"] is False
+        assert result["stranded_count"] == 1
+        methods = [c[1] for c in _calls(mock_client)]
+        assert methods == ["action_end_guarded"], (
+            "close must delegate to the atomic guard in one RPC, not run its "
+            "own count/recheck/close sequence"
+        )
+        _, _, args, kwargs = _calls(mock_client)[0]
+        assert args[0] == [1]
+        assert kwargs == {"force": False}
+
+    def test_close_session_forwards_force_to_the_guard(self, photo, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            {"closed": True, "stranded_count": 1,
+             "stranded_lines": [{"id": 1, "state": "picked_up"}],
+             "summary": "Session PS-1 closed — 1 line(s) left off-shelf."},
+            [{"id": 1, "name": "PS-1", "state": "closed"}],   # self.get()
+        ]
+        result = photo.close_session(1, force=True)
+        assert result["closed"] is True
+        assert result["stranded_count"] == 1
+        assert result["session"]["name"] == "PS-1"
+        _, _, _, kwargs = _calls(mock_client)[0]
+        assert kwargs == {"force": True}
+
+    def test_close_session_closes_cleanly_via_guard(self, photo, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            {"closed": True, "stranded_count": 0, "stranded_lines": [],
+             "summary": "Session PS-1 closed."},
+            [{"id": 1, "name": "PS-1", "state": "closed"}],   # self.get()
+        ]
+        result = photo.close_session(1)
+        assert result["closed"] is True
+        assert result["stranded_count"] == 0
+
+    def test_close_session_reraises_a_real_fault(self, photo, mock_client):
+        """A non-missing-method fault (e.g. access denied) must propagate, not
+        be swallowed into the advisory fallback."""
+        import xmlrpc.client
+        mock_client._models.execute_kw.side_effect = xmlrpc.client.Fault(
+            2, "odoo.exceptions.AccessError: not allowed on photo.session"
+        )
+        with pytest.raises(OdooError):
+            photo.close_session(1)
+
+    # ── Fallback path: advisory guard on an un-upgraded database ──────
+
+    def test_close_session_falls_back_when_guard_absent(self, photo, mock_client):
+        """When the module lacks action_end_guarded, the advisory guard runs
+        and still refuses to strand stock."""
+        mock_client._models.execute_kw.side_effect = [
+            _missing_method_fault(),                              # action_end_guarded
             1,                                                    # search_count
             [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
         ]
@@ -468,16 +492,14 @@ class TestPhotography:
         assert result["stranded_count"] == 1
         assert "action_end" not in [c[1] for c in _calls(mock_client)]
 
-    def test_close_session_counts_stranded_beyond_the_sample_page(
+    def test_fallback_counts_stranded_beyond_the_sample_page(
         self, photo, mock_client
     ):
-        """The guard must count server-side, not measure a page it fetched.
-
-        Fetching the first N lines and filtering lets a session with more than
-        N lines hide a stranded one past the window — the guard then sees
-        nothing and closes over real inventory.
-        """
+        """The advisory guard counts server-side, not by measuring the page it
+        fetched — a session with more lines than the sample must not hide a
+        stranded one."""
         mock_client._models.execute_kw.side_effect = [
+            _missing_method_fault(),                              # action_end_guarded
             5000,                                                 # search_count
             [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
         ]
@@ -493,16 +515,13 @@ class TestPhotography:
         assert any(c[0] == "state" and c[1] == "in" for c in domain
                    if isinstance(c, list))
 
-    def test_close_session_rechecks_immediately_before_closing(
+    def test_fallback_rechecks_immediately_before_closing(
         self, photo, mock_client
     ):
-        """A line picked up mid-call must abort the close.
-
-        The count and the close are separate RPCs, so the guard is advisory,
-        not atomic. Re-checking right before acting narrows the window to one
-        round-trip — it cannot remove it, which the docstring says plainly.
-        """
+        """The advisory guard re-checks right before acting, narrowing (not
+        removing) the race window."""
         mock_client._models.execute_kw.side_effect = [
+            _missing_method_fault(),                             # action_end_guarded
             0,      # initial count: nothing off-shelf
             1,      # recheck: a line went off-shelf in the meantime
             [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
@@ -513,8 +532,9 @@ class TestPhotography:
         assert "went off the shelf while this call was in flight" in result["summary"]
         assert "action_end" not in [c[1] for c in _calls(mock_client)]
 
-    def test_close_session_closes_when_nothing_is_off_shelf(self, photo, mock_client):
+    def test_fallback_closes_when_nothing_is_off_shelf(self, photo, mock_client):
         mock_client._models.execute_kw.side_effect = [
+            _missing_method_fault(),                             # action_end_guarded
             0,      # initial count
             0,      # recheck
             True,   # action_end
@@ -524,10 +544,11 @@ class TestPhotography:
         assert result["closed"] is True
         assert result["stranded_count"] == 0
 
-    def test_close_session_force_closes_and_still_reports(
+    def test_fallback_force_closes_and_still_reports(
         self, photo, mock_client
     ):
         mock_client._models.execute_kw.side_effect = [
+            _missing_method_fault(),                             # action_end_guarded
             1,                                                    # search_count
             [{"id": 1, "state": "picked_up", "product_id": [5, "Laptop"]}],
             True,                                                 # action_end

@@ -37,7 +37,6 @@ from .models.rma import RMAOps
 from .models.warranty import WarrantyOps
 from .models.consignment import ConsignmentOps
 from .models.helpdesk import HelpdeskOps
-from .models.messaging import MessagingOps
 from .models.field_service import FieldServiceOps
 from .models.ebay_listing import EbayListingOps
 from .models.product_gui import ProductGuiOps
@@ -46,7 +45,6 @@ from .models.fb_marketplace import FbMarketplaceOps
 from .models.inbound import InboundOps
 from .models.order_status import OrderStatusOps
 from .models.ebay_messages import EbayMessageOps
-from .models.auction import AuctionOps
 from .models.photography import PhotographyOps
 from .models.pc_build import PcBuildOps
 
@@ -238,7 +236,6 @@ class SmartActionHandler:
         self.warranty = WarrantyOps(client)
         self.consignment = ConsignmentOps(client)
         self.helpdesk = HelpdeskOps(client)
-        self.messaging = MessagingOps(client)
         self.field_service = FieldServiceOps(client)
         self.ebay = EbayListingOps(client)
         self.product_drafts = ProductGuiOps(client)
@@ -247,7 +244,6 @@ class SmartActionHandler:
         self.inbound = InboundOps(client)
         self.order_status = OrderStatusOps(client)
         self.ebay_messages = EbayMessageOps(client)
-        self.auctions = AuctionOps(client)
         self.photography = PhotographyOps(client)
         self.pc_builds = PcBuildOps(client)
 

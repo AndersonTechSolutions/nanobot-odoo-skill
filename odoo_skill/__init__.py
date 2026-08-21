@@ -51,7 +51,6 @@ from .models import (
     WarrantyOps,
     ConsignmentOps,
     HelpdeskOps,
-    MessagingOps,
     FieldServiceOps,
     EbayListingOps,
     ProductGuiOps,
@@ -60,7 +59,6 @@ from .models import (
     InboundOps,
     OrderStatusOps,
     EbayMessageOps,
-    AuctionOps,
     PhotographyOps,
     PcBuildOps,
 )
@@ -101,7 +99,6 @@ __all__ = [
     "WarrantyOps",
     "ConsignmentOps",
     "HelpdeskOps",
-    "MessagingOps",
     "FieldServiceOps",
     "EbayListingOps",
     "ProductGuiOps",
@@ -110,7 +107,6 @@ __all__ = [
     "InboundOps",
     "OrderStatusOps",
     "EbayMessageOps",
-    "AuctionOps",
     "PhotographyOps",
     "PcBuildOps",
     # Smart Actions
