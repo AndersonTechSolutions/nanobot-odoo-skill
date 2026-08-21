@@ -172,6 +172,34 @@ class TestFbMarketplace:
         assert fb.REQUIRED_GROUPS
         assert all("group_fb_marketplace" in g for g in fb.REQUIRED_GROUPS)
 
+    def test_get_image_data_requests_the_binary_field(self, fb, mock_client):
+        """get_image_data is the ONE read that pulls the base64 ``image``.
+
+        get_images withholds it on purpose; if this read stops asking for
+        ``image`` the FB lister silently has no bytes to upload.
+        """
+        mock_client._models.execute_kw.return_value = [
+            {"id": 5, "name": "front", "sequence": 10, "image": "aGk="},
+        ]
+        rows = fb.get_image_data(7)
+
+        model, method, args, odoo_kwargs = _calls(mock_client)[0]
+        assert model == fb.IMAGE_MODEL
+        assert method == "search_read"
+        assert args[0] == [["listing_id", "=", 7]]
+        assert "image" in odoo_kwargs["fields"], (
+            f"image must be requested, got {odoo_kwargs['fields']}"
+        )
+        assert odoo_kwargs["limit"] == 50, "binary read stays explicitly bounded"
+        assert rows[0]["image"] == "aGk="
+
+    def test_get_images_still_withholds_the_binary(self, fb, mock_client):
+        """The plain lister must NOT drag base64 into a transcript."""
+        mock_client._models.execute_kw.return_value = []
+        fb.get_images(7)
+        _, _, _, odoo_kwargs = _calls(mock_client)[0]
+        assert "image" not in odoo_kwargs["fields"]
+
 
 # ── Inbound shipments ────────────────────────────────────────────────
 

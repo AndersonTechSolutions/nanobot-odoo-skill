@@ -251,6 +251,7 @@
     "fb_marketplace.find",
     "fb_marketplace.find_listing",
     "fb_marketplace.get",
+    "fb_marketplace.get_image_data",
     "fb_marketplace.get_images",
     "fb_marketplace.listings_for_product",
     "fb_marketplace.marketplace_summary",

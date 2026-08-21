@@ -203,7 +203,9 @@ class FbMarketplaceOps(BaseOps):
 
         Image *data* is deliberately not returned — a base64 ``image`` field
         would blow up a chat transcript for no benefit. Captions and ids are
-        enough to reason about, and to target a delete.
+        enough to reason about, and to target a delete. When the bytes are
+        actually needed — to re-upload the photo somewhere off Odoo — call
+        :meth:`get_image_data` instead, which opts into the binary explicitly.
         """
         self._require()
         return self.client.search_read(
@@ -211,6 +213,32 @@ class FbMarketplaceOps(BaseOps):
             [["listing_id", "=", listing_id]],
             fields=["id", "name", "sequence"],
             order="sequence, id",
+        )
+
+    def get_image_data(self, listing_id: int, limit: int = 50) -> list[dict]:
+        """Photo rows **with** the base64 ``image`` binary, in display order.
+
+        The one read that returns the actual bytes. :meth:`get_images` withholds
+        them on purpose (transcript bloat); an external poster — the FB
+        Marketplace lister — needs the real payload to hand to a file upload, so
+        this is the explicit opt-in.
+
+        The binary field is ``image`` (base64, no ``data:`` prefix), the same
+        field :meth:`add_image` writes. ``limit`` is passed explicitly rather
+        than leaning on ``search_read``'s implicit page size — a listing never
+        holds that many photos, but a binary read stays bounded on purpose.
+
+        Callers should treat the returned ``image`` values as opaque bytes: do
+        not echo them into a transcript or log. ``image`` may be ``False`` on a
+        row saved without a payload; skip those.
+        """
+        self._require()
+        return self.client.search_read(
+            self.IMAGE_MODEL,
+            [["listing_id", "=", listing_id]],
+            fields=["id", "name", "sequence", "image"],
+            order="sequence, id",
+            limit=limit,
         )
 
     # ── Writes ───────────────────────────────────────────────────────
