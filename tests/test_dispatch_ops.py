@@ -1,7 +1,7 @@
 """Tests for the model-level dispatch surfaces.
 
-``get_inbox_data``, ``get_dispatch_board``, ``dispatch_assign`` and
-``dispatch_unassign`` are all ``@api.model`` methods. Odoo forwards every
+``get_dispatch_board``, ``dispatch_assign`` and ``dispatch_unassign`` are all
+``@api.model`` methods. Odoo forwards every
 positional in the argument vector straight to a model-level method rather
 than consuming a leading ids list, so these must be called with **no** ids
 list — the failure mode that broke ``team-workload``.
@@ -21,7 +21,7 @@ if SKILL_DIR not in sys.path:
     sys.path.insert(0, SKILL_DIR)
 
 from odoo_skill.models.field_service import FieldServiceOps  # noqa: E402
-from odoo_skill.models.messaging import MessagingOps  # noqa: E402
+from odoo_skill.models.pc_build import PcBuildOps  # noqa: E402
 
 
 def _args_of(mock_client, idx=0):
@@ -34,53 +34,8 @@ def _args_of(mock_client, idx=0):
 def fsm(mock_client):
     ops = FieldServiceOps(mock_client)
     ops._available = True
+    ops._model_field_cache = set()
     return ops
-
-
-@pytest.fixture()
-def msg(mock_client):
-    ops = MessagingOps(mock_client)
-    ops._available = True
-    return ops
-
-
-# ── Inbox ────────────────────────────────────────────────────────────
-
-
-class TestInbox:
-
-    def test_sends_no_ids_list(self, msg, mock_client):
-        mock_client._models.execute_kw.return_value = {
-            "conversations": [], "counts": {}, "agents": [], "canned": [],
-        }
-        msg.inbox(view="unassigned")
-        model, method, args = _args_of(mock_client)
-        assert (model, method) == ("atech.conversation", "get_inbox_data")
-        assert args == ["unassigned", ""], (
-            f"expected the declared positionals only, got {args!r}"
-        )
-
-    def test_search_is_forwarded(self, msg, mock_client):
-        mock_client._models.execute_kw.return_value = {"conversations": []}
-        msg.inbox(search="dell latitude")
-        _, _, args = _args_of(mock_client)
-        assert args == ["open", "dell latitude"]
-
-    def test_summary_counts_the_visible_lane(self, msg, mock_client):
-        mock_client._models.execute_kw.return_value = {
-            "conversations": [{"id": 1}, {"id": 2}],
-            "counts": {"open": 9, "unassigned": 4, "pending": 1},
-            "agents": [], "canned": [],
-        }
-        out = msg.inbox()
-        assert "2 conversation(s) shown" in out["summary"]
-        assert "9 open" in out["summary"]
-        assert out["counts"]["unassigned"] == 4
-
-    def test_rejects_unknown_view(self, msg, mock_client):
-        with pytest.raises(ValueError, match="view must be one of"):
-            msg.inbox(view="archived")
-        mock_client._models.execute_kw.assert_not_called()
 
 
 # ── Dispatch board ───────────────────────────────────────────────────
@@ -257,7 +212,7 @@ class TestModelHelperIsNotCliReachable:
     def test_no_ops_class_exposes_a_public_model_caller(self):
         """No subclass may re-expose it under a public name either."""
         from odoo_skill.models._base import BaseOps
-        for cls in (FieldServiceOps, MessagingOps):
+        for cls in (FieldServiceOps, PcBuildOps):
             public = [
                 m for m in dir(cls)
                 if not m.startswith("_") and "call_model" in m

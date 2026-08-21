@@ -293,3 +293,59 @@ class TestDiagnostics:
         info = mock_client.test_connection()
         assert info["status"] == "error"
         assert "down" in info["message"]
+
+
+# ── Null-return marshalling ──────────────────────────────────────────
+
+
+class TestNullMarshalFault:
+    """Odoo cannot encode a ``None`` return over XML-RPC.
+
+    Its controller calls ``xmlrpc.client.dumps(..., allow_none=False)``, which
+    is hardcoded server-side, so a button method ending without a ``return``
+    produces a Fault *after* the call has run and committed. Verified live: the
+    record shows the write applied. Raising it would make a caller retry an
+    action that already happened, so ``execute`` maps exactly this fault to
+    ``None`` — and nothing else.
+    """
+
+    def _fault(self, message):
+        import xmlrpc.client
+        return xmlrpc.client.Fault(1, message)
+
+    def test_null_marshal_fault_becomes_none(self, mock_client):
+        mock_client._models.execute_kw.side_effect = self._fault(
+            "Traceback (most recent call last):\n  ...\n"
+            "TypeError: cannot marshal None unless allow_none is enabled\n"
+        )
+        assert mock_client.execute("repair.order", "action_repair_start", [1]) is None
+
+    def test_other_faults_still_raise(self, mock_client):
+        from odoo_skill.errors import OdooError
+        mock_client._models.execute_kw.side_effect = self._fault(
+            "Paste the Facebook Marketplace URL before marking as listed."
+        )
+        with pytest.raises(OdooError):
+            mock_client.execute("fb.marketplace.listing", "action_mark_listed", [1])
+
+    def test_access_faults_still_raise(self, mock_client):
+        from odoo_skill.errors import OdooError
+        mock_client._models.execute_kw.side_effect = self._fault(
+            "You are not allowed to access 'Photo Session' (photo.session) records."
+        )
+        with pytest.raises(OdooError):
+            mock_client.execute("photo.session", "search_read", [])
+
+    def test_run_action_reports_the_post_action_record(self, mock_client):
+        """A None return must still yield the record's real post-action state."""
+        from odoo_skill.models.fb_marketplace import FbMarketplaceOps
+        ops = FbMarketplaceOps(mock_client)
+        ops._available = True
+        ops._model_field_cache = set()
+        mock_client._models.execute_kw.side_effect = [
+            self._fault("TypeError: cannot marshal None unless allow_none is enabled"),
+            [{"id": 7, "name": "Dell", "state": "sold"}],
+        ]
+        result = ops.run_action(7, "action_mark_sold")
+        assert result["returned"] is None
+        assert result["record"]["state"] == "sold"

@@ -23,11 +23,16 @@ from .rma import RMAOps
 from .warranty import WarrantyOps
 from .consignment import ConsignmentOps
 from .helpdesk import HelpdeskOps
-from .messaging import MessagingOps
 from .field_service import FieldServiceOps
 from .ebay_listing import EbayListingOps
 from .product_gui import ProductGuiOps
 from .itad import ITADOps
+from .fb_marketplace import FbMarketplaceOps
+from .inbound import InboundOps
+from .order_status import OrderStatusOps
+from .ebay_messages import EbayMessageOps
+from .photography import PhotographyOps
+from .pc_build import PcBuildOps
 
 __all__ = [
     "PartnerOps",
@@ -51,9 +56,14 @@ __all__ = [
     "WarrantyOps",
     "ConsignmentOps",
     "HelpdeskOps",
-    "MessagingOps",
     "FieldServiceOps",
     "EbayListingOps",
     "ProductGuiOps",
     "ITADOps",
+    "FbMarketplaceOps",
+    "InboundOps",
+    "OrderStatusOps",
+    "EbayMessageOps",
+    "PhotographyOps",
+    "PcBuildOps",
 ]

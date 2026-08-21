@@ -23,6 +23,7 @@ Two rules this base enforces, both of which matter for unattended agents:
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from ..client import OdooClient
@@ -58,10 +59,16 @@ class BaseOps:
     ALLOWED_ACTIONS: frozenset[str] = frozenset()
     #: Default ordering for searches.
     ORDER: str = ""
+    #: Odoo group xmlids the API user needs to reach :attr:`MODEL` at all.
+    #: Set on classes whose module ships restrictive ``ir.model.access`` rows —
+    #: see :meth:`access_check`.
+    REQUIRED_GROUPS: tuple[str, ...] = ()
 
     def __init__(self, client: OdooClient) -> None:
         self.client = client
         self._available: Optional[bool] = None
+        self._model_field_cache: Optional[set[str]] = None
+        self._warned_dropped: bool = False
 
     # ── Availability ─────────────────────────────────────────────────
 
@@ -72,7 +79,11 @@ class BaseOps:
         """
         if self._available is None:
             try:
-                self.client.fields_get(self.MODEL, attributes=["type"])
+                described = self.client.fields_get(self.MODEL, attributes=["type"])
+                # Reuse this describe for _model_fields() rather than paying a
+                # second round-trip for the same information.
+                if isinstance(described, dict):
+                    self._model_field_cache = {str(k) for k in described}
                 self._available = True
             except OdooError:
                 self._available = False
@@ -90,12 +101,133 @@ class BaseOps:
                 f"Install the '{self.MODULE or 'providing'}' module first."
             )
 
+    def access_check(self) -> dict:
+        """Report whether the API user can actually read :attr:`MODEL`.
+
+        There are two very different reasons an ops class returns nothing
+        useful, and the raw faults do not distinguish them well: the module is
+        not installed, or it is installed but the API user is outside the
+        groups its ``ir.model.access`` rows name. The second is the one that
+        bites in practice — it is invisible until the first call, it is
+        all-or-nothing rather than a partial read, and its fault text is a
+        wall of group names. Both collapse to one diagnosable answer here,
+        naming the group to grant when that is the problem.
+
+        Subclasses only need to set :attr:`REQUIRED_GROUPS` for the message to
+        name the right groups; the check itself works regardless.
+        """
+        if not self.available():
+            return {
+                "ok": False,
+                "reason": "module_not_installed",
+                "summary": (
+                    f"The '{self.MODULE or 'providing'}' module is not "
+                    f"installed on this database ({self.MODEL} is absent)."
+                ),
+                "model": self.MODEL,
+            }
+        try:
+            self.client.search_count(self.MODEL, [])
+        except OdooError as exc:
+            groups = list(self.REQUIRED_GROUPS)
+            hint = (
+                f" Add it to {groups[0]}"
+                + (" (or one of: " + ", ".join(groups[1:]) + ")"
+                   if len(groups) > 1 else "")
+                + " in Odoo → Settings → Users & Companies → Users."
+                if groups else
+                " Check the ir.model.access rows for this model."
+            )
+            return {
+                "ok": False,
+                "reason": "no_access",
+                "summary": (
+                    f"The API user cannot read {self.MODEL}.{hint}"
+                ),
+                "model": self.MODEL,
+                "required_groups": groups,
+                "error": str(exc)[:300],
+            }
+        return {
+            "ok": True,
+            "summary": f"{self.MODEL} is readable by the API user.",
+            "model": self.MODEL,
+        }
+
     # ── Read ─────────────────────────────────────────────────────────
+    #
+    # Field lists must survive module drift between databases.
+    #
+    # The module guard above handles a missing *model*. It does not handle a
+    # missing *field*, which is the more common shape: an optional module adds
+    # columns to a model that already exists everywhere. `helpdesk_repair` puts
+    # `ticket_id` on repair.order and `repair_ids` on helpdesk.ticket;
+    # `atech_messaging` puts `sms_fsm_*` on project.task. Those are installed
+    # on staging and not on production.
+    #
+    # Odoo's read() rejects an unknown field outright rather than skipping it,
+    # so one such name makes EVERY get() on that namespace raise — while the
+    # list and summary methods keep working, because they use LIST_FIELDS. That
+    # is why it goes unnoticed: the loud paths are fine and only get() is dead.
+    #
+    # So the declared lists are intersected with what the database actually has.
+    # A field from a module this database lacks is dropped (once, with a log
+    # line) instead of poisoning every read. Declarations stay complete, and
+    # each database gets what it can serve.
+    #
+    # Scope note: this filters the class's OWN declarations. An explicit
+    # `fields=` from a caller is passed through untouched — a typo there should
+    # surface as an error rather than be silently swallowed.
+
+    def _model_fields(self) -> set[str]:
+        """Field names that actually exist on :attr:`MODEL`, cached."""
+        if self._model_field_cache is None:
+            self._model_field_cache = set()
+            try:
+                described = self.client.fields_get(self.MODEL, attributes=["type"])
+            except OdooError:
+                # Cannot introspect (no access): leave the cache empty so
+                # _existing() does not filter, and let the real error surface
+                # from the actual read rather than from here.
+                described = None
+            # Only trust a genuine mapping. Anything else (a test double, an
+            # unexpected shape) leaves the cache empty, which disables
+            # filtering — the safe direction, since filtering against a bogus
+            # set would silently strip every field.
+            if isinstance(described, dict):
+                self._model_field_cache = {str(k) for k in described}
+        return self._model_field_cache
+
+    def _existing(self, fields: list[str]) -> list[str]:
+        """Drop declared fields this database does not have."""
+        real = self._model_fields()
+        if not real:
+            return fields
+        keep = [f for f in fields if f in real]
+        dropped = [f for f in fields if f not in real]
+        if not keep:
+            # Odoo reads ALL fields when `fields` is empty, so returning []
+            # here would quietly turn a narrow read into a full one. If the
+            # declared list matches nothing, the class is pointed at the wrong
+            # model — hand back the declaration and let the read say so.
+            logger.warning(
+                "%s: none of the declared fields exist on this database (%s); "
+                "not filtering.", self.MODEL, ", ".join(fields[:5]),
+            )
+            return fields
+        dropped_note = dropped
+        if dropped_note and not self._warned_dropped:
+            self._warned_dropped = True
+            logger.info(
+                "%s: dropping field(s) not present on this database: %s "
+                "(an optional module that declares them is not installed here)",
+                self.MODEL, ", ".join(sorted(dropped_note)),
+            )
+        return keep
 
     def _fields(self, detail: bool = False) -> list[str]:
-        if detail:
-            return self.DETAIL_FIELDS or self.LIST_FIELDS
-        return self.LIST_FIELDS
+        declared = (self.DETAIL_FIELDS or self.LIST_FIELDS) if detail else self.LIST_FIELDS
+        return self._existing(declared)
 
     def search(
         self,
@@ -380,6 +512,22 @@ def _describe_action(action: dict) -> dict:
         "target": action.get("target"),
         "tag": action.get("tag"),
     }
+
+
+def utc_now() -> datetime:
+    """Timezone-aware current UTC time."""
+    return datetime.now(timezone.utc)
+
+
+def utc_stamp(offset: Optional[timedelta] = None) -> str:
+    """An Odoo-format UTC timestamp, optionally shifted by *offset*.
+
+    Odoo stores and compares datetimes as naive UTC strings, so the tzinfo is
+    dropped after the arithmetic — computing in aware UTC and formatting naive
+    is the same wall time without the ``utcnow()`` deprecation.
+    """
+    moment = utc_now() + (offset or timedelta())
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def summarize(rows: Iterable[dict], label: str, empty: str = "none") -> str:

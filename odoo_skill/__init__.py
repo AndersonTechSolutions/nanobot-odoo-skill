@@ -51,11 +51,16 @@ from .models import (
     WarrantyOps,
     ConsignmentOps,
     HelpdeskOps,
-    MessagingOps,
     FieldServiceOps,
     EbayListingOps,
     ProductGuiOps,
     ITADOps,
+    FbMarketplaceOps,
+    InboundOps,
+    OrderStatusOps,
+    EbayMessageOps,
+    PhotographyOps,
+    PcBuildOps,
 )
 from .smart_actions import SmartActionHandler
 from .sync import OdooChangePoller, OdooWebhookServer
@@ -94,11 +99,16 @@ __all__ = [
     "WarrantyOps",
     "ConsignmentOps",
     "HelpdeskOps",
-    "MessagingOps",
     "FieldServiceOps",
     "EbayListingOps",
     "ProductGuiOps",
     "ITADOps",
+    "FbMarketplaceOps",
+    "InboundOps",
+    "OrderStatusOps",
+    "EbayMessageOps",
+    "PhotographyOps",
+    "PcBuildOps",
     # Smart Actions
     "SmartActionHandler",
     # Sync

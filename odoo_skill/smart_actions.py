@@ -37,11 +37,16 @@ from .models.rma import RMAOps
 from .models.warranty import WarrantyOps
 from .models.consignment import ConsignmentOps
 from .models.helpdesk import HelpdeskOps
-from .models.messaging import MessagingOps
 from .models.field_service import FieldServiceOps
 from .models.ebay_listing import EbayListingOps
 from .models.product_gui import ProductGuiOps
 from .models.itad import ITADOps
+from .models.fb_marketplace import FbMarketplaceOps
+from .models.inbound import InboundOps
+from .models.order_status import OrderStatusOps
+from .models.ebay_messages import EbayMessageOps
+from .models.photography import PhotographyOps
+from .models.pc_build import PcBuildOps
 
 logger = logging.getLogger("odoo_skill")
 
@@ -231,11 +236,16 @@ class SmartActionHandler:
         self.warranty = WarrantyOps(client)
         self.consignment = ConsignmentOps(client)
         self.helpdesk = HelpdeskOps(client)
-        self.messaging = MessagingOps(client)
         self.field_service = FieldServiceOps(client)
         self.ebay = EbayListingOps(client)
         self.product_drafts = ProductGuiOps(client)
         self.itad = ITADOps(client)
+        self.fb_marketplace = FbMarketplaceOps(client)
+        self.inbound = InboundOps(client)
+        self.order_status = OrderStatusOps(client)
+        self.ebay_messages = EbayMessageOps(client)
+        self.photography = PhotographyOps(client)
+        self.pc_builds = PcBuildOps(client)
 
         # Learned aliases take precedence over baked-in ones so Ian can
         # override a bad built-in without editing code.

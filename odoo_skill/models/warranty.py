@@ -78,14 +78,21 @@ class WarrantyOps(BaseOps):
 
     def expiring_soon(self, days: int = 30, limit: int = 50) -> list[dict]:
         """Active registrations expiring within *days*."""
+        return self.search(self._expiring_domain(days), limit=limit)
+
+    def _expiring_domain(self, days: int = 30) -> list:
+        """Domain for the expiry queue — shared by the list and the count.
+
+        Fully server-side, so :meth:`warranty_summary` can count it exactly
+        instead of reporting the length of a capped page.
+        """
         from datetime import date, timedelta
         cutoff = (date.today() + timedelta(days=days)).isoformat()
-        return self.search(
-            [["state", "=", "active"],
-             ["end_date", "<=", cutoff],
-             ["end_date", ">=", date.today().isoformat()]],
-            limit=limit,
-        )
+        return [
+            ["state", "=", "active"],
+            ["end_date", "<=", cutoff],
+            ["end_date", ">=", date.today().isoformat()],
+        ]
 
     def find_by_serial(self, serial: str, limit: int = 10) -> list[dict]:
         """Find registrations covering a serial number."""
@@ -260,7 +267,7 @@ class WarrantyOps(BaseOps):
             s: self.client.search_count(self.CLAIM_MODEL, [["state", "=", s]])
             for s in CLAIM_STATES
         }
-        expiring = len(self.expiring_soon(days=30, limit=200))
+        expiring = self.count(self._expiring_domain(30))
         return {
             "summary": (
                 f"Warranty: {reg['active']} active registrations "

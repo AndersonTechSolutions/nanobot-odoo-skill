@@ -23,11 +23,11 @@ _LIST_FIELDS = [
     "planned_date_begin", "date_deadline", "fsm_done", "project_id",
 ]
 _DETAIL_FIELDS = _LIST_FIELDS + [
-    "description", "partner_phone", "partner_email",
+    "description", "partner_phone",
     "fsm_signed_by", "fsm_confirmation_sent", "fsm_reminder_sent",
     "sms_fsm_confirmation_sent", "sms_fsm_reminder_sent",
     "sms_fsm_completed_sent", "fsm_image_ids", "syncro_ticket_id",
-    "tag_ids", "kanban_state",
+    "tag_ids", "state",
 ]
 
 _IMAGE_FIELDS = ["id", "display_name", "create_date"]
