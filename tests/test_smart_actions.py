@@ -73,7 +73,8 @@ class TestFindOrCreateProduct:
 
     def test_creates_product_when_not_found(self, smart, mock_client):
         mock_client._models.execute_kw.side_effect = [
-            [],    # search_read
+            [],    # search_read product
+            [{"account_sale_tax_id": [3, "FL Sales Tax 7%"]}],  # res.company tax
             200,   # create
             [{"id": 200, "name": "Gizmo", "default_code": False,
               "list_price": 0.0, "type": "consu"}],  # read
@@ -84,17 +85,34 @@ class TestFindOrCreateProduct:
 
     def test_created_product_uses_defaults(self, smart, mock_client):
         mock_client._models.execute_kw.side_effect = [
-            [],    # search_read
+            [],    # search_read product
+            [{"account_sale_tax_id": [3, "FL Sales Tax 7%"]}],  # res.company tax
             201,   # create
             [{"id": 201, "name": "Thing", "default_code": False,
               "list_price": 15.0, "type": "consu"}],  # read
         ]
         result = smart.find_or_create_product("Thing", list_price=15.0, allow_create=True)
         assert result["created"] is True
-        # Verify create was called with the list_price default
-        create_call = mock_client._models.execute_kw.call_args_list[1]
+        # Verify create was called with the list_price default. Call order:
+        # [0]=search product, [1]=res.company tax, [2]=create, [3]=read.
+        create_call = mock_client._models.execute_kw.call_args_list[2]
         create_vals = create_call[0][5][0]  # args list -> first positional -> values dict
         assert create_vals["list_price"] == 15.0
+
+    def test_created_product_is_taxable(self, smart, mock_client):
+        # A newly created product must carry Customer Taxes = the company's
+        # default sale tax, so it is never sold tax-free.
+        mock_client._models.execute_kw.side_effect = [
+            [],    # search_read product
+            [{"account_sale_tax_id": [3, "FL Sales Tax 7%"]}],  # res.company tax
+            202,   # create
+            [{"id": 202, "name": "Taxable", "default_code": False,
+              "list_price": 0.0, "type": "consu"}],  # read
+        ]
+        smart.find_or_create_product("Taxable", allow_create=True)
+        create_call = mock_client._models.execute_kw.call_args_list[2]
+        create_vals = create_call[0][5][0]
+        assert create_vals["taxes_id"] == [(6, 0, [3])]
 
 
 # ── smart_create_quotation ────────────────────────────────────────
@@ -134,6 +152,7 @@ class TestSmartCreateQuotation:
             [{"id": 50, "name": "Rocky", "email": "", "phone": "",
               "is_company": True}],  # partner read
             [],   # product search_read (not found)
+            [{"account_sale_tax_id": [3, "FL Sales Tax 7%"]}],  # res.company tax
             60,   # product create
             [{"id": 60, "name": "Rock", "default_code": False,
               "list_price": 0.0, "type": "consu"}],  # product read
