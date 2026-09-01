@@ -539,6 +539,36 @@ class SmartActionHandler:
             "matched": [],
         }
 
+    def _default_sale_tax_command(self):
+        """Odoo write-command setting Customer Taxes to the company's default
+        sale tax, or ``None`` if none can be resolved.
+
+        Resolves the company's ``account_sale_tax_id`` (the same default Odoo
+        would apply), falling back to the first active sale tax. Memoized for
+        the life of this instance so repeated product creation is one query."""
+        cached = getattr(self, "_sale_tax_cmd_cache", "unset")
+        if cached != "unset":
+            return cached
+        tax_id = None
+        try:
+            comps = self.client.search_read(
+                "res.company", [], fields=["account_sale_tax_id"], limit=1)
+            if comps and comps[0].get("account_sale_tax_id"):
+                tax_id = comps[0]["account_sale_tax_id"][0]
+        except Exception:  # noqa: BLE001 — tax lookup must never block create
+            tax_id = None
+        if not tax_id:
+            try:
+                taxes = self.client.search_read(
+                    "account.tax", [["type_tax_use", "=", "sale"]],
+                    fields=["id"], limit=1)
+                if taxes:
+                    tax_id = taxes[0]["id"]
+            except Exception:  # noqa: BLE001
+                tax_id = None
+        self._sale_tax_cmd_cache = [(6, 0, [tax_id])] if tax_id else None
+        return self._sale_tax_cmd_cache
+
     def find_or_create_product(
         self,
         name: str,
@@ -588,6 +618,13 @@ class SmartActionHandler:
             "list_price": defaults.pop("list_price", 0.0),
         }
         create_vals.update(defaults)
+
+        # Ensure the product is taxable on creation: stamp Customer Taxes with
+        # the company's default sale tax unless the caller supplied taxes_id.
+        if "taxes_id" not in create_vals:
+            tax_cmd = self._default_sale_tax_command()
+            if tax_cmd:
+                create_vals["taxes_id"] = tax_cmd
 
         product_id = self.client.create("product.product", create_vals)
         product = self.client.read(

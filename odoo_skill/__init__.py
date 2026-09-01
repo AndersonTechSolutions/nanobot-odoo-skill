@@ -17,7 +17,7 @@ Usage::
     )
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 from .client import OdooClient
 from .config import OdooConfig, load_config
