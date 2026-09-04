@@ -34,6 +34,7 @@ import statistics
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from ..errors import OdooError, OdooRecordNotFoundError
 from ._base import BaseOps, OdooActionNotAllowedError
 
 logger = logging.getLogger("odoo_skill")
@@ -161,6 +162,17 @@ class EbayListingOps(BaseOps):
     #: Alias so existing callers of :meth:`run_product_action` keep working.
     ALLOWED_PRODUCT_ACTIONS = ALLOWED_ACTIONS
 
+    def available(self) -> bool:
+        """``product.template`` always exists; eBay is available only when
+        ``sale_ebay`` has added its fields to it."""
+        if self._available is None:
+            if super().available() and self._model_field_cache:
+                self._available = "ebay_use" in self._model_field_cache
+                if not self._available:
+                    logger.info("product.template has no ebay_use field "
+                                "(sale_ebay not installed)")
+        return bool(self._available)
+
     # ── Lookup ───────────────────────────────────────────────────────
 
     def active_listings(self, limit: int = 100) -> list[dict]:
@@ -197,7 +209,7 @@ class EbayListingOps(BaseOps):
         ``None`` and ``summary`` says why.
         """
         self._require()
-        raw = (ref or "").strip()
+        raw = str(ref if ref is not None else "").strip()
         m = re.match(r"^(?:fb[:\s#]*)?(\d+)$", raw, re.I)
         if m:
             fb_id = int(m.group(1))
@@ -223,12 +235,16 @@ class EbayListingOps(BaseOps):
                     f"{tmpl_id}" if tmpl_id else
                     f"FB listing #{fb_id} has no product."),
             }
-        m = re.match(r"^(?:sku[:\s]*)?(\S+)$", raw, re.I)
+        m = re.match(r"^sku[:\s]+(\S+)$", raw, re.I)
         token = m.group(1) if m else raw
-        if _SKU_RE.match(token) and (raw.lower().startswith("sku") or "-" in token
+        explicit_sku = bool(m)
+        if _SKU_RE.match(token) and (explicit_sku or "-" in token
                                      or token.upper() == token):
+            # =ilike is case-insensitive but treats _ and % as wildcards;
+            # escape them so "FBM_1" cannot match "FBM-1".
+            escaped = token.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
             rows = self.client.search_read(
-                self.MODEL, [["default_code", "=ilike", token]],
+                self.MODEL, [["default_code", "=ilike", escaped]],
                 fields=self._fields(), limit=2,
             )
             if len(rows) == 1:
@@ -333,24 +349,37 @@ class EbayListingOps(BaseOps):
 
         Optionally moves the product to *categ_id* first (a category with
         eBay defaults configured — see ``odoo-ebay-custom``). The fork's
-        ``apply_ebay_policies_from_category`` overwrites; this snapshots the
-        already-set policy fields and restores them, so a value chosen by
-        hand is never clobbered. Returns the resulting policy field ids.
+        ``apply_ebay_policies_from_category`` overwrites unconditionally, so
+        this reads the category defaults itself and issues ONE write holding
+        only the fields that are still blank — a value chosen by hand is
+        never touched, and a failure mid-way cannot leave the product
+        half-copied. Returns the resulting policy field ids.
         """
         self._require()
         if categ_id:
             self.client.write(self.MODEL, product_tmpl_id, {"categ_id": int(categ_id)})
-        before = self.client.read(
-            self.MODEL, [product_tmpl_id], fields=list(_POLICY_FIELDS))[0]
-        preset = {f: _m2o_id(before.get(f)) for f in _POLICY_FIELDS if _m2o_id(before.get(f))}
-        self.client.execute(self.MODEL, "apply_ebay_policies_from_category", [product_tmpl_id])
-        after = self.client.read(
-            self.MODEL, [product_tmpl_id], fields=list(_POLICY_FIELDS))[0]
-        restore = {f: pid for f, pid in preset.items() if _m2o_id(after.get(f)) != pid}
-        if restore:
-            self.client.write(self.MODEL, product_tmpl_id, restore)
-            after.update({f: [pid, ""] for f, pid in restore.items()})
-        return {f: _m2o_id(after.get(f)) for f in _POLICY_FIELDS}
+        current = self.client.read(
+            self.MODEL, [product_tmpl_id], fields=["categ_id", *_POLICY_FIELDS])[0]
+        result = {f: _m2o_id(current.get(f)) for f in _POLICY_FIELDS}
+        categ = _m2o_id(current.get("categ_id"))
+        if not categ:
+            return result
+        try:
+            cat_rows = self.client.read(
+                "product.category", [categ], fields=list(_POLICY_FIELDS))
+        except OdooError:
+            # odoo-ebay-custom (which adds these fields to the category)
+            # is not installed — nothing to copy.
+            return result
+        defaults = cat_rows[0] if cat_rows else {}
+        fill = {
+            f: _m2o_id(defaults.get(f)) for f in _POLICY_FIELDS
+            if not result[f] and _m2o_id(defaults.get(f))
+        }
+        if fill:
+            self.client.write(self.MODEL, product_tmpl_id, fill)
+            result.update(fill)
+        return result
 
     def add_images(self, product_tmpl_id: int, images: list[dict]) -> dict:
         """Append photos: ``[{"datas": <base64>, "name": <str>}, …]``."""
@@ -426,7 +455,6 @@ class EbayListingOps(BaseOps):
         tmpl = self.client.read(
             self.MODEL, [product_tmpl_id], fields=self._fields(detail=True))
         if not tmpl:
-            from ..errors import OdooRecordNotFoundError
             raise OdooRecordNotFoundError(
                 f"No product.template with id {product_tmpl_id}")
         tmpl = tmpl[0]
@@ -493,11 +521,13 @@ class EbayListingOps(BaseOps):
         storable = tmpl.get("type") == "product"
         if sync_stock and storable:
             defaults["ebay_sync_stock"] = True
-            on_hand = int(tmpl.get("virtual_available") or tmpl.get("qty_available") or 0)
-            if on_hand > 0:
-                defaults["ebay_quantity"] = on_hand
-            else:
-                notes.append("No stock on hand — quantity left as-is; publish will block until stock exists.")
+            # Mirror what push does (max(virtual_available, 0)) so the
+            # readiness check sees the real quantity; a stale default of 1
+            # must not publish a positive quantity for an empty shelf.
+            on_hand = max(int(tmpl.get("virtual_available") or 0), 0)
+            defaults["ebay_quantity"] = on_hand
+            if on_hand <= 0:
+                notes.append("No stock on hand — quantity set to 0; publish is blocked until stock exists.")
         elif sync_stock and not storable:
             notes.append("Not a storable product — stock sync left off.")
         if fb and not tmpl.get("ebay_item_condition_id"):
@@ -541,7 +571,9 @@ class EbayListingOps(BaseOps):
         """Publish the product to eBay (live API call, publicly visible).
 
         Runs the wizard's readiness check first and refuses on any blocker
-        or when the product is already live, then calls
+        or when the product is already live (``ebay_wizard_push`` repeats
+        that live check server-side; Kevin is a single worker, so the two
+        checks are not otherwise serialised), then calls
         ``ebay_wizard_push`` (→ ``push_product_ebay``). Returns
         ``{"published", "ebay_url", "status", "summary"}``; a refused or
         failed push is ``published: False`` with the reason, never an
@@ -642,7 +674,6 @@ class EbayListingOps(BaseOps):
             self.MODEL, [product_tmpl_id], fields=_COMP_FIELDS
         )
         if not rows:
-            from ..errors import OdooRecordNotFoundError
             raise OdooRecordNotFoundError(
                 f"No product.template with id {product_tmpl_id}"
             )

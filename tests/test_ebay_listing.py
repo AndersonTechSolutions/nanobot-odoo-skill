@@ -85,6 +85,24 @@ class TestResolveItem:
         assert out["product_tmpl_id"] == 77
         assert not _by(mock_client, TMPL, "search_read")
 
+    def test_python_int_is_accepted(self, ops, mock_client):
+        Router(mock_client, {("fb.marketplace.listing", "search_read"): []})
+        assert ops.resolve_item(12)["fb_listing_id"] == 12
+
+    def test_sku_prefix_needs_a_separator(self, ops, mock_client):
+        """``SKU123`` is a SKU named SKU123, not FB listing / SKU ``123``."""
+        Router(mock_client, {(TMPL, "search_read"): []})
+        ops.resolve_item("SKU123")
+        domain = _by(mock_client, TMPL, "search_read")[0][2][0]
+        assert domain == [["default_code", "=ilike", "SKU123"]]
+        assert not _by(mock_client, "fb.marketplace.listing", "search_read")
+
+    def test_sku_wildcards_are_escaped(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "search_read"): []})
+        ops.resolve_item("sku FBM_1")
+        domain = _by(mock_client, TMPL, "search_read")[0][2][0]
+        assert domain == [["default_code", "=ilike", "FBM\\_1"]]
+
     @pytest.mark.parametrize("ref", ["fb 12", "fb:12", "FB#12"])
     def test_fb_prefixes(self, ops, mock_client, ref):
         Router(mock_client, {("fb.marketplace.listing", "search_read"): []})
@@ -156,35 +174,53 @@ def test_text_to_html_escapes():
     assert _text_to_html("<b>x</b>") == "<p>&lt;b&gt;x&lt;/b&gt;</p>"
 
 
+POLICY_FIELDS = (
+    "ebay_category_id", "ebay_store_category_id", "ebay_template_id",
+    "ebay_seller_payment_policy_id", "ebay_seller_return_policy_id",
+    "ebay_seller_shipping_policy_id")
+BLANK = {f: False for f in POLICY_FIELDS}
+
+
 class TestSetCategoryDefaults:
 
-    def test_hand_set_policy_is_restored_after_category_copy(self, ops, mock_client):
-        reads = iter([
-            [{"id": 7, "ebay_seller_shipping_policy_id": [86, "USPS"],
-              "ebay_seller_payment_policy_id": False, "ebay_seller_return_policy_id": False,
-              "ebay_template_id": False, "ebay_category_id": False,
-              "ebay_store_category_id": False}],
-            [{"id": 7, "ebay_seller_shipping_policy_id": [122, "UPS"],
-              "ebay_seller_payment_policy_id": [2, "Pay"], "ebay_seller_return_policy_id": [6, "R"],
-              "ebay_template_id": [52, "T"], "ebay_category_id": False,
-              "ebay_store_category_id": False}],
-        ])
-        Router(mock_client, {(TMPL, "read"): lambda a, k: next(reads)})
+    def test_only_blank_fields_are_filled_in_one_write(self, ops, mock_client):
+        def read(args, kw):
+            return [dict(BLANK, id=7, categ_id=[67, "One-Off"],
+                         ebay_seller_shipping_policy_id=[86, "USPS"])]
+        cat = dict(BLANK, id=67, ebay_seller_shipping_policy_id=[122, "UPS"],
+                   ebay_seller_payment_policy_id=[2, "Pay"],
+                   ebay_seller_return_policy_id=[6, "R"], ebay_template_id=[52, "T"])
+        Router(mock_client, {(TMPL, "read"): read, ("product.category", "read"): [cat]})
         out = ops.set_category_defaults(7, categ_id=67)
         writes = _by(mock_client, TMPL, "write")
         assert writes[0][2] == [[7], {"categ_id": 67}]
-        assert writes[1][2] == [[7], {"ebay_seller_shipping_policy_id": 86}]
-        assert _by(mock_client, TMPL, "apply_ebay_policies_from_category")[0][2] == [[7]]
-        assert out["ebay_seller_shipping_policy_id"] == 86
+        assert writes[1][2] == [[7], {"ebay_seller_payment_policy_id": 2,
+                                      "ebay_seller_return_policy_id": 6,
+                                      "ebay_template_id": 52}]
+        assert len(writes) == 2
+        assert out["ebay_seller_shipping_policy_id"] == 86  # hand-set, kept
         assert out["ebay_seller_payment_policy_id"] == 2
+        assert not _by(mock_client, TMPL, "apply_ebay_policies_from_category")
 
-    def test_nothing_preset_means_no_restore_write(self, ops, mock_client):
-        blank = {f: False for f in (
-            "ebay_category_id", "ebay_store_category_id", "ebay_template_id",
-            "ebay_seller_payment_policy_id", "ebay_seller_return_policy_id",
-            "ebay_seller_shipping_policy_id")}
-        Router(mock_client, {(TMPL, "read"): [dict(blank, id=7)]})
+    def test_category_without_defaults_writes_nothing(self, ops, mock_client):
+        Router(mock_client, {
+            (TMPL, "read"): [dict(BLANK, id=7, categ_id=[1, "All"])],
+            ("product.category", "read"): [dict(BLANK, id=1)],
+        })
         ops.set_category_defaults(7)
+        assert not _by(mock_client, TMPL, "write")
+
+    def test_missing_custom_module_is_tolerated(self, ops, mock_client):
+        from odoo_skill.errors import OdooError
+
+        def boom(args, kw):
+            raise OdooError("Invalid field ebay_template_id on product.category")
+        Router(mock_client, {
+            (TMPL, "read"): [dict(BLANK, id=7, categ_id=[1, "All"])],
+            ("product.category", "read"): boom,
+        })
+        out = ops.set_category_defaults(7)
+        assert out["ebay_template_id"] is False
         assert not _by(mock_client, TMPL, "write")
 
 
@@ -215,17 +251,12 @@ class TestAddImagesFromFb:
 def _stage_router(mock_client, tmpl, fb=None, conditions=None, state=None,
                   variant_ids=None):
     """Router for the stage_listing flow with a blank policy set."""
-    blank = {f: False for f in (
-        "ebay_category_id", "ebay_store_category_id", "ebay_template_id",
-        "ebay_seller_payment_policy_id", "ebay_seller_return_policy_id",
-        "ebay_seller_shipping_policy_id")}
-
     def read(args, kw):
         fields = kw.get("fields") or []
         if "product_image_ids" in fields and len(fields) == 1:
             return [{"id": tmpl["id"], "product_image_ids": tmpl.get("product_image_ids", [])}]
-        if set(fields) == set(blank):
-            return [dict(blank, id=tmpl["id"])]
+        if set(fields) == {"categ_id", *POLICY_FIELDS}:
+            return [dict(BLANK, id=tmpl["id"], categ_id=[1, "All"])]
         return [dict(tmpl)]
 
     def fb_search(args, kw):
@@ -237,6 +268,7 @@ def _stage_router(mock_client, tmpl, fb=None, conditions=None, state=None,
 
     return Router(mock_client, {
         (TMPL, "read"): read,
+        ("product.category", "read"): [dict(BLANK, id=1)],
         (TMPL, "search"): lambda a, k: variant_ids or [],
         ("product.product", "search"): lambda a, k: variant_ids or [],
         (TMPL, "ebay_wizard_save"): lambda a, k: dict(state or _state()),
@@ -290,6 +322,18 @@ class TestStageListing:
         assert vals["ebay_quantity"] == 3
         assert out["readiness"]["can_push"] is True
         assert "ready to publish" in out["summary"]
+
+    def test_zero_stock_sets_quantity_zero_so_readiness_blocks(self, ops, mock_client):
+        _stage_router(mock_client, dict(BASE_TMPL, virtual_available=0.0, qty_available=2.0))
+        out = ops.stage_listing(7)
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["ebay_quantity"] == 0
+        assert any("quantity set to 0" in n for n in out["notes"])
+
+    def test_negative_forecast_clamps_to_zero(self, ops, mock_client):
+        _stage_router(mock_client, dict(BASE_TMPL, virtual_available=-2.0))
+        ops.stage_listing(7)
+        assert _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]["ebay_quantity"] == 0
 
     def test_consumable_gets_no_stock_sync(self, ops, mock_client):
         _stage_router(mock_client, dict(BASE_TMPL, type="consu"))
