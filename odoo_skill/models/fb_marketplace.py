@@ -53,7 +53,7 @@ _LIST_FIELDS = [
 _DETAIL_FIELDS = _LIST_FIELDS + [
     "description", "first_listed_date", "sold_date", "days_listed",
     "days_to_sell", "ai_generated", "is_temp", "image_ids", "currency_id",
-    "create_date", "write_uid",
+    "create_date", "write_uid", "location_id", "shippable",
 ]
 
 #: ``state`` values, in lifecycle order.
