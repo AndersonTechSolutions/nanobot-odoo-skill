@@ -152,7 +152,7 @@ exactly how those two shipped ungated. Adding any ops method now fails
 | `consignment` | `consignment.order` | `atech_consignment` | `pipeline_summary`, `items_awaiting_payout`, `set_pricing` |
 | `helpdesk` | `helpdesk.ticket` | `atech_helpdesk` | `desk_summary`, `ebay_action_needed`, `draft_ai_reply` |
 | `field_service` | `project.task` (FSM) | `atech_field_service` | `dispatch_board`, `schedule_job`, `unschedule_job`, `unscheduled_jobs` |
-| `ebay` | `ebay.listing` | `sale_ebay` | `listing_summary`, `research_comps`, `get_pricing`, `apply_suggested_price`, `publish` |
+| `ebay` | `product.template` | `sale_ebay` | `resolve_item`, `stage_listing`, `readiness`, `publish`, `end_listing`, `set_sold_comps`, `get_pricing`, `apply_suggested_price`, `listing_summary` |
 | `product_drafts` | `quick.product.draft` | `quick_product`, `new_product_gui` | `attention_needed`, `stalled_drafts`, `ai_spend_summary` |
 | `itad` | `tasks` | `projects-custom` | `ops_summary`, `upcoming_pickups`, `sla_at_risk`, `schedule_pickup` |
 | `fb_marketplace` | `fb.marketplace.listing` | `fb_marketplace_lister` | `marketplace_summary`, `renewal_due`, `stale_listings`, `needs_content`, `mark_listed`, `mark_renewed` |
@@ -329,6 +329,47 @@ is not FSM, or the user is not a technician) — that is reported as
 `status: "refused"`, never as success. `dispatch_unassign` is worse: it
 returns `True` unconditionally, even when it changes nothing, so
 `unschedule_job` confirms by reading the dates back.
+
+### eBay listings live on `product.template`
+
+`sale_ebay` ships an `ebay.listing` model, but its own code marks it unused
+in production: a live listing *is* a `product.template` with the `ebay_*`
+fields set, pushed through the eBay Sell Inventory API. The `ebay` namespace
+wraps the guided-wizard RPC surface on the template (`ebay_wizard_state` /
+`_save` / `_add_images` / `_push`), so an agent stages exactly what the
+wizard would.
+
+Staging and publishing are separate, deliberately:
+
+```bash
+# 1. resolve — a bare integer is ALWAYS an FB Marketplace listing id,
+#    "FBM-00012" is an exact SKU, anything else is a name search
+python3 odoo.py call ebay.resolve_item --args '{"ref": "12"}'
+# 2. stage — enables eBay, copies category policy defaults into blank
+#    fields only, fills title/price/condition/description/photos (from the
+#    FB listing when given), best offer on, stock sync on; reports readiness
+python3 odoo.py call ebay.stage_listing \
+  --args '{"product_tmpl_id": 4211, "fb_listing_id": 12,
+           "fallback": {"payment_policy_id": 2, "return_policy_id": 6,
+                        "shipping_policy_id": 122, "template_id": 52}}' --confirm
+# 3. publish — re-checks readiness, refuses on blockers or if already live
+python3 odoo.py call ebay.publish --args '{"product_tmpl_id": 4211}' --confirm
+python3 odoo.py call ebay.end_listing --args '{"product_tmpl_id": 4211}' --confirm
+```
+
+`stage_listing` never pushes and never calls `action_list_on_ebay` (that
+posts a chatter note); `publish` never pushes a product whose
+`ebay_listing_status` is Active / Out Of Stock. `ebay_description` is not in
+the wizard's editable whitelist, so `set_listing_fields(description=...)`
+writes it directly (plain text is escaped into `<p>` markup). Photos publish
+from the gallery (`product_image_ids`), not `image_1920` — `stage_listing`
+copies FB listing photos there once and skips when the gallery already has
+any.
+
+`set_sold_comps` stores prices gathered outside Odoo (e.g. eBay *sold*
+results read in a browser — the Browse API only sees asking prices). It
+writes the comp aggregates only; `ebay_suggested_price` stays Odoo-computed
+so the cost floor still applies.
 
 ### eBay repricing is proposal-first
 

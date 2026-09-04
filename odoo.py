@@ -575,6 +575,9 @@ _WRITE_PREFIXES = (
     # aggregates back to the product; learn_location persists an alias to
     # location_vocab.json. Both mutate despite reading like queries.
     "research", "learn",
+    # ebay.stage_listing writes ebay_* fields, sale_ok and gallery photos;
+    # it never publishes, but it is still a mutation.
+    "stage_",
 )
 
 
