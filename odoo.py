@@ -554,6 +554,8 @@ OPS_NAMESPACES = {
 _WRITE_EXACT = frozenset({
     "assign", "close", "reopen", "reply", "publish", "unpublish",
     "schedule", "reschedule", "unschedule", "rescrape", "unlink",
+    # EbayListingOps.revise pushes a staged revision to eBay.
+    "revise",
     # BaseOps.update / BaseOps.create are inherited by every namespace;
     # "create" is caught by the prefix, bare "update" needs naming here.
     "update",
@@ -575,6 +577,9 @@ _WRITE_PREFIXES = (
     # aggregates back to the product; learn_location persists an alias to
     # location_vocab.json. Both mutate despite reading like queries.
     "research", "learn",
+    # ebay.stage_listing writes ebay_* fields, sale_ok and gallery photos;
+    # it never publishes, but it is still a mutation.
+    "stage_",
 )
 
 
