@@ -618,3 +618,203 @@ class TestRevise:
         Router(mock_client, {(TMPL, "ebay_wizard_revise_discard"): {
             "success": False, "error": "nothing_staged", "message": "No staged revision."}})
         assert ops.revise_discard(7)["summary"] == "No staged revision."
+
+
+class TestSpecifics:
+    """Item specifics: status / category aspects / set (server does the work)."""
+
+    STATUS = {
+        "success": True, "source": "ebay", "can_push": False,
+        "category": {"id": 5707, "name": "Headsets"},
+        "required": [
+            {"name": "Type", "status": "placeholder", "value": "TOBEFILLED",
+             "attribute_id": 12, "mode": "select",
+             "values_sample": ["Headset", "Earpiece"], "values_total": 10},
+            {"name": "Brand", "status": "ok", "value": "Bose", "attribute_id": 3,
+             "mode": "free", "values_sample": [], "values_total": 0},
+            {"name": "Model", "status": "missing", "value": None, "attribute_id": None,
+             "mode": "free", "values_sample": [], "values_total": 0},
+        ],
+        "optional": [
+            {"name": "Cup Style", "status": "invalid", "value": "Over Ear",
+             "attribute_id": 9, "mode": "select",
+             "values_sample": ["Over-Ear", "On-Ear"], "values_total": 2},
+        ],
+        "extra": ["Colour"],
+        "blocking": ["Type", "Model"],
+    }
+
+    def test_status_passes_refresh_and_summarises(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_specifics_status"): dict(self.STATUS)})
+        out = ops.specifics_status(7, refresh=True)
+        calls = _by(mock_client, TMPL, "ebay_wizard_specifics_status")
+        assert len(calls) == 1 and calls[0][2] == [[7], True]
+        s = out["summary"]
+        assert s.startswith("BLOCKED — eBay requires: Type, Model | ")
+        assert "Type — PLACEHOLDER (select: Headset, Earpiece …+8)" in s
+        assert "Brand=Bose" in s
+        assert "Model — MISSING (no Odoo attribute)" in s
+        assert "Cup Style=Over Ear — INVALID (allowed: Over-Ear, On-Ear)" in s
+        assert "also sent: Colour" in s
+        assert not _by(mock_client, TMPL, "write")
+
+    def test_status_ok_default_no_refresh(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_specifics_status"): {
+            "success": True, "source": "cache", "can_push": True,
+            "required": [{"name": "Type", "status": "ok", "value": "Headset"}],
+            "optional": [], "extra": [], "blocking": []}})
+        out = ops.specifics_status(7)
+        assert _by(mock_client, TMPL, "ebay_wizard_specifics_status")[0][2] == [[7], False]
+        assert out["summary"] == "Specifics OK | required: Type=Headset"
+
+    def test_status_source_none_and_no_category(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_specifics_status"): {
+            "success": True, "source": "none", "can_push": True,
+            "required": [], "optional": [], "extra": [], "blocking": []}})
+        s = ops.specifics_status(7)["summary"]
+        assert s.startswith("Specifics UNVERIFIED — eBay aspect list unavailable")
+        assert "Specifics OK" not in s
+        Router(mock_client, {(TMPL, "ebay_wizard_specifics_status"): {
+            "success": False, "error": "no_category", "message": "No eBay category set."}})
+        assert ops.specifics_status(7)["summary"] == "No eBay category set."
+        Router(mock_client, {(TMPL, "ebay_wizard_specifics_status"): {
+            "success": False, "error": "access"}})
+        assert ops.specifics_status(7)["summary"] == "Refused: access"
+
+    def test_status_multi_value_does_not_invite_guessing(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_specifics_status"): {
+            "success": True, "source": "cache", "can_push": False,
+            "required": [{"name": "Type", "status": "multi_value", "value": "Headset, Earpiece"}],
+            "optional": [], "extra": [], "blocking": ["Type"]}})
+        s = ops.specifics_status(7)["summary"]
+        assert "Type=Headset, Earpiece — MULTI-VALUE" in s
+        assert "pick one" not in s and "ask the operator" in s
+
+    ASPECTS = {
+        "success": True, "category": {"id": 5707},
+        "aspects": [
+            {"name": "Type", "required": True, "usage": "required", "mode": "select",
+             "values": [f"V{i}" for i in range(10)]},
+            {"name": "Brand", "required": True, "usage": "required", "mode": "free", "values": []},
+            {"name": "Model", "required": False, "usage": "recommended", "mode": "free",
+             "values": []},
+        ],
+    }
+
+    def test_category_aspects_summary_truncates(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_category_aspects"): dict(self.ASPECTS)})
+        out = ops.category_aspects(7)
+        assert _by(mock_client, TMPL, "ebay_wizard_category_aspects")[0][2] == [[7], False]
+        assert len(out["aspects"]) == 3
+        assert out["summary"] == (
+            "Type [REQUIRED, select: V0, V1, V2, V3, V4, V5, V6, V7 …+2]; "
+            "Brand [REQUIRED, free text]; Model [recommended, free text]")
+
+    def test_category_aspects_filter_full_list(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_category_aspects"): dict(self.ASPECTS)})
+        out = ops.category_aspects(7, refresh=True, aspect="  type ")
+        assert _by(mock_client, TMPL, "ebay_wizard_category_aspects")[0][2] == [[7], True]
+        assert [a["name"] for a in out["aspects"]] == ["Type"]
+        assert out["summary"] == "Type [REQUIRED, select: " + ", ".join(f"V{i}" for i in range(10)) + "]"
+        out = ops.category_aspects(7, aspect="Colour")
+        assert out["aspects"] == [] and out["summary"] == "No aspect named 'Colour' in this category."
+
+    def test_category_aspects_failure(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_category_aspects"): {
+            "success": False, "error": "fetch_failed", "message": "eBay timeout."}})
+        assert ops.category_aspects(7)["summary"] == "eBay timeout."
+
+    def test_set_passes_clean_values_and_flags(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_set_specifics"): {
+            "success": True, "needs_attributes": [],
+            "results": [
+                {"name": "Type", "input": "headset", "written": True, "attribute": "existing",
+                 "value": "existing", "stored_value": "Headset", "skipped": None},
+                {"name": "Brand", "input": "Bose", "written": True, "attribute": "existing",
+                 "value": "created", "stored_value": "Bose", "skipped": None},
+            ],
+            "status": {"success": True, "source": "ebay", "can_push": True,
+                       "required": [{"name": "Type", "status": "ok", "value": "Headset"},
+                                    {"name": "Brand", "status": "ok", "value": "Bose"}],
+                       "optional": [], "extra": [], "blocking": []}}})
+        out = ops.set_specifics(7, {" Type ": " headset ", "Brand": "Bose", "Model": None})
+        calls = _by(mock_client, TMPL, "ebay_wizard_set_specifics")
+        assert len(calls) == 1
+        assert calls[0][2] == [[7], {"Type": "headset", "Brand": "Bose", "Model": ""}, False, False]
+        assert out["summary"] == ("Type=Headset [wrote]; Brand=Bose (new value) [wrote]"
+                                  " | Specifics OK | required: Type=Headset; Brand=Bose")
+
+    def test_set_create_attributes_dry_run_flags(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_set_specifics"): {
+            "success": True, "needs_attributes": [],
+            "results": [{"name": "Model", "input": "A20", "written": False,
+                         "attribute": "created", "value": "created", "stored_value": "A20",
+                         "skipped": None}]}})
+        out = ops.set_specifics(7, {"Model": "A20"}, create_attributes=True, dry_run="yes")
+        assert _by(mock_client, TMPL, "ebay_wizard_set_specifics")[0][2] == \
+            [[7], {"Model": "A20"}, True, True]
+        assert out["summary"] == "Model=A20 (new attribute, new value) [would write]"
+
+    def test_set_create_attributes_string_false_stays_false(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_set_specifics"): {
+            "success": True, "needs_attributes": [], "results": []}})
+        for val in ("false", "False", "0", "no", 0, ""):
+            ops.set_specifics(7, {"Model": "A20"}, create_attributes=val)
+        calls = _by(mock_client, TMPL, "ebay_wizard_set_specifics")
+        assert len(calls) == 6 and all(c[2][2] is False for c in calls)
+        ops.set_specifics(7, {"Model": "A20"}, create_attributes="true")
+        assert _by(mock_client, TMPL, "ebay_wizard_set_specifics")[-1][2][2] is True
+
+    def test_set_create_attributes_garbage_refused(self, ops, mock_client):
+        Router(mock_client)
+        for val in ("maybe", 2, [True], {"ok": 1}, "ok"):
+            out = ops.set_specifics(7, {"Model": "A20"}, create_attributes=val)
+            assert out["success"] is False and out["error"] == "bad_create_attributes"
+        assert not _by(mock_client, TMPL, "ebay_wizard_set_specifics")
+
+    def test_set_skips_and_needs_attributes(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_set_specifics"): {
+            "success": True, "needs_attributes": ["Model"],
+            "results": [
+                {"name": "Model", "input": "A20", "written": False, "attribute": "missing",
+                 "skipped": "attribute_missing"},
+                {"name": "Type", "input": "Headphone", "written": False, "attribute": "existing",
+                 "skipped": "invalid_value", "suggestions": ["Headset", "Earpiece"]},
+                {"name": "Grade", "input": "A", "written": False, "skipped": "variant_attribute"},
+                {"name": "Foo", "input": "x", "written": False, "skipped": "not_an_aspect"},
+                {"name": "Bar", "input": "y", "written": False, "skipped": "aspects_unavailable"},
+                {"name": "Baz", "input": "", "written": False, "skipped": "blank"},
+            ],
+            "status": {"success": True, "source": "ebay", "can_push": False,
+                       "required": [{"name": "Type", "status": "placeholder", "value": "TOBEFILLED",
+                                     "attribute_id": 12, "mode": "select",
+                                     "values_sample": ["Headset"], "values_total": 1}],
+                       "optional": [], "extra": [], "blocking": ["Type"]}}})
+        out = ops.set_specifics(7, {"Model": "A20", "Type": "Headphone", "Grade": "A",
+                                    "Foo": "x", "Bar": "y", "Baz": ""})
+        s = out["summary"]
+        assert "Model — NO ODOO ATTRIBUTE (ask Ian; retry with create_attributes)" in s
+        assert "Type='Headphone' — INVALID (did you mean: Headset, Earpiece)" in s
+        assert "Grade — skipped (variant attribute)" in s
+        assert "Foo — skipped (not an aspect of this category)" in s
+        assert "Bar — skipped (eBay aspect list unavailable, retry later)" in s
+        assert "Baz — skipped (blank)" in s
+        assert " | needs OK to create attribute(s): Model | BLOCKED — eBay requires: Type | " in s
+        assert s.endswith("required: Type — PLACEHOLDER (select: Headset)")
+
+    def test_set_bad_values_no_rpc(self, ops, mock_client):
+        Router(mock_client)
+        for bad in ({}, None, "Type=Headset", ["Type"]):
+            out = ops.set_specifics(7, bad)
+            assert out["success"] is False and out["error"] == "bad_values"
+        assert not _by(mock_client, TMPL, "ebay_wizard_set_specifics")
+
+    def test_set_server_refusal(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_set_specifics"): {
+            "success": False, "error": "no_category", "message": "No eBay category set."}})
+        out = ops.set_specifics(7, {"Type": "Headset"})
+        assert out["success"] is False and out["summary"] == "No eBay category set."
+        Router(mock_client, {(TMPL, "ebay_wizard_set_specifics"): {
+            "success": False, "error": "access"}})
+        assert ops.set_specifics(7, {"Type": "Headset"})["summary"] == "Refused: access"
+

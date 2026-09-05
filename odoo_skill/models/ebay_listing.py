@@ -139,6 +139,23 @@ def _text_to_html(text: str) -> str:
     )
 
 
+def _strict_bool(value) -> Optional[bool]:
+    """True/False for a real boolean or the strings true/false/1/0/yes/no
+    (case-insensitive); ``None`` for anything else — ``bool("false")`` is
+    True, which must never turn into an attribute-creating write."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes"):
+            return True
+        if v in ("false", "0", "no", ""):
+            return False
+    return None
+
+
 class EbayListingOps(BaseOps):
     """Listing lifecycle (stage → publish → end) and comp-driven repricing."""
 
@@ -724,6 +741,169 @@ class EbayListingOps(BaseOps):
         restored = ", ".join(result.get("restored") or []) or "nothing"
         result["summary"] = f"Discarded staged revision ({restored} restored)."
         return result
+
+    # ── Item specifics (eBay category aspects) ───────────────────────
+    #
+    # eBay refuses publishOffer when a REQUIRED aspect of the category is
+    # missing ("The item specific Type is missing"). Specifics are the
+    # product's attribute lines; the server (sale_ebay ≥ 1.38) knows which
+    # aspects the category requires and validates against eBay's allowed
+    # values. Fill them at stage time; ``publish`` refuses with
+    # ``missing_specifics`` while required ones are unfilled.
+
+    @staticmethod
+    def _specifics_entry_text(e: dict) -> str:
+        status = e.get("status")
+        name = e.get("name")
+        if status == "ok":
+            return f"{name}={e.get('value')}"
+        if status == "multi_value":
+            return (f"{name}={e.get('value')} — MULTI-VALUE (eBay takes one; "
+                    "keep the value the item actually has, or ask the operator)")
+        if status == "invalid":
+            sample = ", ".join(e.get("values_sample") or [])
+            more = e.get("values_total", 0) - len(e.get("values_sample") or [])
+            hint = f" (allowed: {sample}{f' …+{more}' if more > 0 else ''})" if sample else ""
+            return f"{name}={e.get('value')} — INVALID{hint}"
+        if status == "variant_attribute":
+            return f"{name} — VARIANT ATTRIBUTE (not fillable here; set in Odoo)"
+        label = "PLACEHOLDER" if status == "placeholder" else "MISSING"
+        if e.get("mode") == "select" and e.get("values_sample"):
+            sample = ", ".join(e["values_sample"])
+            more = e.get("values_total", 0) - len(e["values_sample"])
+            return f"{name} — {label} (select: {sample}{f' …+{more}' if more > 0 else ''})"
+        return f"{name} — {label}" + ("" if e.get("attribute_id") else " (no Odoo attribute)")
+
+    def _specifics_summary(self, st: dict) -> str:
+        if not st.get("success"):
+            return st.get("message") or f"Refused: {st.get('error') or 'unknown'}"
+        req = "; ".join(self._specifics_entry_text(e) for e in st.get("required") or []) or "none"
+        opt = "; ".join(self._specifics_entry_text(e) for e in st.get("optional") or [])
+        parts = [f"required: {req}"]
+        if opt:
+            parts.append(f"optional: {opt}")
+        if st.get("extra"):
+            parts.append("also sent: " + ", ".join(st["extra"]))
+        if not st.get("can_push"):
+            head = "BLOCKED — eBay requires: " + ", ".join(st.get("blocking") or [])
+        elif st.get("source") == "none":
+            head = ("Specifics UNVERIFIED — eBay aspect list unavailable, requirements "
+                    "unknown (retry with refresh before publishing)")
+        else:
+            head = "Specifics OK"
+        return head + " | " + " | ".join(parts)
+
+    def specifics_status(self, product_tmpl_id: int, refresh: bool = False) -> dict:
+        """Required / optional item specifics of the product's eBay category
+        vs. its attribute lines (``ebay_wizard_specifics_status``).
+
+        Entries carry ``status`` ``ok`` | ``missing`` | ``placeholder`` |
+        ``invalid`` | ``multi_value`` | ``variant_attribute``, the stored
+        ``value``, ``attribute_id`` (an Odoo attribute exists), ``mode``
+        (``select`` = eBay's list is exhaustive, see ``values_sample`` /
+        :meth:`category_aspects`). ``blocking`` names stop ``publish``.
+        ``source`` ``none`` = eBay unreachable with no cached list.
+        """
+        self._require()
+        st = self._revise_result(self.client.execute(
+            self.MODEL, "ebay_wizard_specifics_status", [product_tmpl_id], bool(refresh)))
+        st["summary"] = self._specifics_summary(st)
+        return st
+
+    def category_aspects(self, product_tmpl_id: int, refresh: bool = False,
+                         aspect: Optional[str] = None) -> dict:
+        """eBay's aspect list for the product's category (cached 7 days on
+        the category; ``refresh`` re-fetches). ``aspect`` narrows to one
+        name (case-insensitive) with its full allowed-value list."""
+        self._require()
+        out = self._revise_result(self.client.execute(
+            self.MODEL, "ebay_wizard_category_aspects", [product_tmpl_id], bool(refresh)))
+        aspects = out.get("aspects") or []
+        if aspect:
+            key = " ".join(aspect.split()).lower()
+            aspects = [a for a in aspects if " ".join(a["name"].split()).lower() == key]
+            out["aspects"] = aspects
+        if not out.get("success"):
+            out["summary"] = out.get("message") or "No aspect data."
+        elif aspect and not aspects:
+            out["summary"] = f"No aspect named {aspect!r} in this category."
+        else:
+            bits = []
+            for a in aspects:
+                flag = "REQUIRED" if a.get("required") else a.get("usage", "optional")
+                if a.get("mode") == "select":
+                    vals = a.get("values") or []
+                    shown = vals if aspect else vals[:8]
+                    tail = "" if aspect or len(vals) <= 8 else f" …+{len(vals) - 8}"
+                    bits.append(f"{a['name']} [{flag}, select: {', '.join(shown)}{tail}]")
+                else:
+                    bits.append(f"{a['name']} [{flag}, free text]")
+            out["summary"] = "; ".join(bits) or "No aspects."
+        return out
+
+    def set_specifics(self, product_tmpl_id: int, values: dict,
+                      create_attributes: bool = False, dry_run: bool = False) -> dict:
+        """Fill item specifics by aspect name (``{"Type": "Headset"}``).
+
+        Server rules (``ebay_wizard_set_specifics``): only aspects of the
+        product's eBay category or lines the product already has; values on
+        existing attributes are matched case-insensitively and created when
+        absent; select-only aspects are normalised to eBay's spelling or
+        refused (``invalid_value`` + ``suggestions``); a MISSING Odoo
+        attribute is only created with ``create_attributes=True`` — the
+        operator must OK that first (``needs_attributes`` lists them);
+        variant-creating attributes are never written. ``dry_run`` reports
+        without writing. Returns per-aspect ``results`` plus the fresh
+        ``status`` (not on dry run). Values must come from the item itself
+        (listing text / photos) — never guessed to satisfy a requirement.
+        """
+        self._require()
+        if not isinstance(values, dict) or not values:
+            return {"success": False, "error": "bad_values",
+                    "summary": "Pass a non-empty mapping of aspect name → value."}
+        clean = {str(k).strip(): ("" if v is None else str(v).strip()) for k, v in values.items()}
+        create = _strict_bool(create_attributes)
+        if create is None:
+            return {"success": False, "error": "bad_create_attributes",
+                    "summary": "create_attributes must be true or false "
+                               f"(got {create_attributes!r}); it needs the operator's explicit OK."}
+        out = self._revise_result(self.client.execute(
+            self.MODEL, "ebay_wizard_set_specifics", [product_tmpl_id], clean,
+            create, bool(dry_run)))
+        if not out.get("success"):
+            out["summary"] = out.get("message") or f"Refused: {out.get('error')}"
+            return out
+        lines = []
+        for r in out.get("results") or []:
+            name, sk = r.get("name"), r.get("skipped")
+            if sk == "attribute_missing":
+                lines.append(f"{name} — NO ODOO ATTRIBUTE (ask Ian; retry with create_attributes)")
+            elif sk == "invalid_value":
+                sug = ", ".join(r.get("suggestions") or [])
+                lines.append(f"{name}={r.get('input')!r} — INVALID" + (f" (did you mean: {sug})" if sug else ""))
+            elif sk == "variant_attribute":
+                lines.append(f"{name} — skipped (variant attribute)")
+            elif sk == "not_an_aspect":
+                lines.append(f"{name} — skipped (not an aspect of this category)")
+            elif sk == "aspects_unavailable":
+                lines.append(f"{name} — skipped (eBay aspect list unavailable, retry later)")
+            elif sk:
+                lines.append(f"{name} — skipped ({sk})")
+            else:
+                tags = []
+                if r.get("attribute") == "created":
+                    tags.append("new attribute")
+                if r.get("value") == "created":
+                    tags.append("new value")
+                tag = f" ({', '.join(tags)})" if tags else ""
+                verb = "would write" if dry_run else "wrote"
+                lines.append(f"{name}={r.get('stored_value')}{tag} [{verb}]")
+        out["summary"] = "; ".join(lines) or "Nothing to write."
+        if out.get("needs_attributes"):
+            out["summary"] += " | needs OK to create attribute(s): " + ", ".join(out["needs_attributes"])
+        if out.get("status"):
+            out["summary"] += " | " + self._specifics_summary(out["status"])
+        return out
 
     # ── Repricing (proposal-first) ───────────────────────────────────
 
