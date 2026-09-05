@@ -530,3 +530,91 @@ class TestReads:
         Router(mock_client, {(TMPL, "ebay_wizard_state"): _state(
             {"can_push": False, "blockers": ["a", "b"], "warnings": [], "already_listed": False})})
         assert ops.readiness(7)["summary"] == "Blocked: a; b"
+
+
+class TestRevise:
+    """Stage → approve(hash) → push for a LIVE listing; refusals are dicts."""
+
+    def test_stage_passes_vals_and_html_description(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {
+            "success": True, "hash": "abc", "can_revise": True,
+            "diff": [{"field": "ebay_title", "label": "Title", "old": "A", "new": "B", "pushable": True},
+                     {"field": "ebay_sync_stock", "label": "Sync stock", "old": True, "new": False,
+                      "pushable": False}],
+            "warnings": []}})
+        out = ops.revise_stage(7, {"ebay_title": "  B  ", "ebay_quantity": 2}, description="line1\nline2")
+        call = _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0]
+        assert call[2][0] == [7]
+        assert call[2][1] == {"ebay_title": "B", "ebay_quantity": 2}
+        assert call[2][2] == _text_to_html("line1\nline2")
+        assert out["hash"] == "abc"
+        assert "Revise ready" in out["summary"] and "(Odoo only)" in out["summary"]
+
+    def test_stage_keeps_html_description_verbatim(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {"success": True, "diff": [], "hash": "h"}})
+        ops.revise_stage(7, None, description="<p>hi</p>")
+        assert _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][2] == "<p>hi</p>"
+
+    def test_stage_without_description_sends_none(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {"success": True, "diff": [], "hash": "h"}})
+        out = ops.revise_stage(7, {"ebay_fixed_price": 99.0})
+        assert _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][2] is None
+        assert out["summary"] == "Nothing changed."
+
+    def test_stage_refusal_is_a_dict(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {
+            "success": False, "error": "not_live", "message": "Not live on eBay."}})
+        out = ops.revise_stage(7, {"ebay_title": "x"})
+        assert out["success"] is False and out["summary"] == "Not live on eBay."
+
+    def test_revise_requires_hash_without_rpc(self, ops, mock_client):
+        Router(mock_client)
+        out = ops.revise(7, "")
+        assert out == {"revised": False, "reason": "hash_required",
+                       "summary": "Pass the hash from the staged diff."}
+        assert not _by(mock_client, TMPL, "ebay_wizard_revise")
+
+    def test_revise_pushes_with_hash(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise"): {
+            "success": True, "ebay_url": "https://www.ebay.com/itm/1", "status": "Active",
+            "pushed": ["Title"], "skipped": [], "message": "Revised: Title."}})
+        out = ops.revise(7, "abc")
+        assert _by(mock_client, TMPL, "ebay_wizard_revise")[0][2] == [[7], "abc"]
+        assert out["revised"] is True and out["pushed"] == ["Title"]
+        assert out["ebay_url"].endswith("/itm/1") and out["summary"] == "Revised: Title."
+
+    def test_revise_stale_refusal_not_raised(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise"): {
+            "success": False, "error": "stale", "message": "Product changed since staging."}})
+        out = ops.revise(7, "old")
+        assert out["revised"] is False and out["reason"] == "stale"
+        assert out["partial_risk"] is False and "changed" in out["summary"]
+
+    def test_revise_ebay_error_carries_partial_risk(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise"): {
+            "success": False, "error": "ebay_error", "partial_risk": True,
+            "message": "boom — eBay may have been PARTIALLY updated"}})
+        out = ops.revise(7, "abc")
+        assert out["reason"] == "ebay_error" and out["partial_risk"] is True
+
+    def test_status_is_read_only(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_status"): {
+            "success": True, "can_revise": False, "diff": [], "hash": None}})
+        out = ops.revision_status(7)
+        calls = _by(mock_client, TMPL, "ebay_wizard_revise_status")
+        assert len(calls) == 1 and calls[0][2] == [[7]]
+        assert out["can_revise"] is False
+        assert not _by(mock_client, TMPL, "write")
+
+    def test_discard_summary(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_discard"): {
+            "success": True, "restored": ["Title", "Price"], "not_restored": []}})
+        out = ops.revise_discard(7)
+        calls = _by(mock_client, TMPL, "ebay_wizard_revise_discard")
+        assert len(calls) == 1 and calls[0][2] == [[7]]
+        assert out["summary"] == "Discarded staged revision (Title, Price restored)."
+
+    def test_discard_nothing_staged(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_discard"): {
+            "success": False, "error": "nothing_staged", "message": "No staged revision."}})
+        assert ops.revise_discard(7)["summary"] == "No staged revision."

@@ -554,6 +554,8 @@ OPS_NAMESPACES = {
 _WRITE_EXACT = frozenset({
     "assign", "close", "reopen", "reply", "publish", "unpublish",
     "schedule", "reschedule", "unschedule", "rescrape", "unlink",
+    # EbayListingOps.revise pushes a staged revision to eBay.
+    "revise",
     # BaseOps.update / BaseOps.create are inherited by every namespace;
     # "create" is caught by the prefix, bare "update" needs naming here.
     "update",

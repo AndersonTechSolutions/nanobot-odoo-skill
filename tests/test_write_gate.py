@@ -49,7 +49,7 @@ WRITES = [
     "note_line", "send_reply", "revise_draft", "log_time", "move_stage",
     "remove_component", "generate_content", "reset_draft", "close_session",
     "save_as_catalog", "find_or_create_partner", "draft_reply", "draft_ai_reply",
-    "set_watching", "set_dismissed",
+    "set_watching", "set_dismissed", "revise", "revise_stage", "revise_discard",
 ]
 
 #: Names that MUST NOT require --confirm — reads that begin with a write verb.
@@ -61,6 +61,7 @@ READS = [
     "pending_ai_drafts", "with_pending_draft", "awaiting_confirmation",
     "catalog_builds", "open_sessions", "ready_to_receive", "stalled_drafts",
     "lots_for_watchlist", "bench_summary", "get_lines", "find_by_serial",
+    "revision_status",
 ]
 
 

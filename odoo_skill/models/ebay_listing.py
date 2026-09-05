@@ -617,6 +617,114 @@ class EbayListingOps(BaseOps):
             "record": rec,
         }
 
+    # ── Revising a live listing (stage → approve → push) ─────────────
+
+    @staticmethod
+    def _revise_result(result, key: str = "success") -> dict:
+        if not isinstance(result, dict):
+            result = {key: bool(result)}
+        return result
+
+    def revision_status(self, product_tmpl_id: int) -> dict:
+        """Pending (unpushed) revision diff for a live listing, if any.
+
+        Wraps ``ebay_wizard_revise_status``: ``diff`` (old → new per field
+        with a ``pushable`` flag), ``warnings`` (drift since staging, not
+        live), ``can_revise`` and the ``hash`` to pass to :meth:`revise`.
+        """
+        self._require()
+        return self._revise_result(self.client.execute(
+            self.MODEL, "ebay_wizard_revise_status", [product_tmpl_id]))
+
+    def revise_stage(self, product_tmpl_id: int, vals: Optional[dict] = None,
+                     description: Optional[str] = None) -> dict:
+        """Stage a change to a LIVE listing — writes Odoo, never eBay.
+
+        ``vals`` keys: ``ebay_title``, ``ebay_item_condition_id``,
+        ``ebay_condition_description``, ``ebay_fixed_price``,
+        ``ebay_quantity``, ``ebay_best_offer*``, ``ebay_template_id``
+        (category / type / policies are not revisable: end + relist).
+        ``description`` (text or HTML) goes to ``ebay_description``. Returns
+        the server's cumulative diff since the first stage, per-field
+        pushability warnings, ``can_revise`` and the ``hash`` that
+        :meth:`revise` must echo back. Re-runnable; a quantity change turns
+        stock sync off server-side (reported as a warning).
+        """
+        self._require()
+        clean = dict(vals or {})
+        if clean.get("ebay_title"):
+            clean["ebay_title"] = str(clean["ebay_title"]).strip()[:EBAY_TITLE_MAX]
+        body = None
+        if description is not None:
+            body = description if "<" in description and ">" in description \
+                else _text_to_html(description)
+        result = self._revise_result(self.client.execute(
+            self.MODEL, "ebay_wizard_revise_stage", [product_tmpl_id], clean, body))
+        if result.get("success"):
+            result["summary"] = self._revise_summary(result)
+        else:
+            result["summary"] = result.get("message") or "Stage refused."
+        return result
+
+    @staticmethod
+    def _revise_summary(result: dict) -> str:
+        diff = result.get("diff") or []
+        if not diff:
+            return "Nothing changed."
+        parts = []
+        for d in diff:
+            mark = "" if d.get("pushable") else " (Odoo only)"
+            parts.append(f"{d.get('label')}: {d.get('old')!r} → {d.get('new')!r}{mark}")
+        head = "Revise ready" if result.get("can_revise") else "Nothing pushable"
+        return f"{head}: " + "; ".join(parts)
+
+    def revise(self, product_tmpl_id: int, expected_hash: str) -> dict:
+        """Push the staged revision to eBay (live API call, public).
+
+        ``expected_hash`` is the ``hash`` from the diff the operator
+        approved; the server refuses (``stale``) when the product changed
+        since, and also on ``nothing_staged`` / ``nothing_to_push`` /
+        ``no_offer`` / ``not_live`` / ``busy``. Returns ``{"revised",
+        "reason"?, "ebay_url", "status", "summary", "pushed", "skipped"}``;
+        never raises for a refusal so the caller can relay it verbatim. An
+        ``ebay_error`` carries ``partial_risk``: check the live listing
+        before retrying.
+        """
+        self._require()
+        if not expected_hash:
+            return {"revised": False, "reason": "hash_required",
+                    "summary": "Pass the hash from the staged diff."}
+        result = self._revise_result(self.client.execute(
+            self.MODEL, "ebay_wizard_revise", [product_tmpl_id], str(expected_hash)))
+        if not result.get("success"):
+            return {"revised": False,
+                    "reason": result.get("error") or "revise_failed",
+                    "partial_risk": bool(result.get("partial_risk")),
+                    "ebay_url": result.get("ebay_url") or None,
+                    "summary": result.get("message") or "eBay revise failed."}
+        return {
+            "revised": True,
+            "ebay_url": result.get("ebay_url") or None,
+            "status": result.get("status"),
+            "pushed": result.get("pushed") or [],
+            "skipped": result.get("skipped") or [],
+            "summary": result.get("message") or "Revised on eBay.",
+        }
+
+    def revise_discard(self, product_tmpl_id: int) -> dict:
+        """Drop the staged revision: restore the snapshot in Odoo (eBay is
+        untouched). ``not_restored`` lists what could not be put back
+        (deleted photos, item specifics)."""
+        self._require()
+        result = self._revise_result(self.client.execute(
+            self.MODEL, "ebay_wizard_revise_discard", [product_tmpl_id]))
+        if not result.get("success"):
+            result["summary"] = result.get("message") or "Nothing to discard."
+            return result
+        restored = ", ".join(result.get("restored") or []) or "nothing"
+        result["summary"] = f"Discarded staged revision ({restored} restored)."
+        return result
+
     # ── Repricing (proposal-first) ───────────────────────────────────
 
     def research_comps(self, product_tmpl_id: int) -> dict:
