@@ -37,10 +37,13 @@ Four things shape this class:
   those filters run server-side.
 """
 
+import html
 import logging
+import re
 from datetime import timedelta
 from typing import Any, Optional
 
+from ..errors import OdooError
 from ._base import BaseOps, utc_stamp
 
 logger = logging.getLogger("odoo_skill")
@@ -54,6 +57,25 @@ _DETAIL_FIELDS = _LIST_FIELDS + [
     "description", "first_listed_date", "sold_date", "days_listed",
     "days_to_sell", "ai_generated", "is_temp", "image_ids", "currency_id",
     "create_date", "write_uid", "location_id", "shippable",
+    # fb_marketplace_lister 4.x per-sale history; dropped by _existing()
+    # on databases still running an older module.
+    "sold_price", "sold_qty", "sale_count", "can_record_sale",
+]
+
+#: ``product.template`` fields read by :meth:`FbMarketplaceOps.create_from_product`.
+_PRODUCT_FIELDS = [
+    "id", "name", "default_code", "list_price", "type", "qty_available",
+    "description_sale", "fb_temp", "fb_listed",
+]
+
+#: sale_ebay fields for the eBay side of a product; read separately because
+#: the eBay connector is optional and a missing field fails the whole read.
+_EBAY_FIELDS = ["ebay_listed", "ebay_listing_status", "ebay_fixed_price", "ebay_url"]
+
+#: ``product.template`` fields in the channel-gap lists.
+_GAP_FIELDS = [
+    "id", "name", "default_code", "list_price", "qty_available", "fb_temp",
+    "fb_channel_status", "ebay_channel_status",
 ]
 
 #: ``state`` values, in lifecycle order.
@@ -96,6 +118,10 @@ class FbMarketplaceOps(BaseOps):
         # media / print
         "action_add_product_image",
         "action_print_fb_label",
+        # sales (4.x): plain-dict RPCs, gated server-side by the
+        # "Record Sales" group for the invoice path
+        "fb_record_sale",
+        "fb_invoice_sales",
     })
 
     # ── Reads ────────────────────────────────────────────────────────
@@ -198,6 +224,51 @@ class FbMarketplaceOps(BaseOps):
             limit=limit,
         )
 
+    def ebay_live_not_on_fb(self, limit: int = 50) -> list[dict]:
+        """Products live on eBay with no open FB listing (multichannel gap).
+
+        ``ebay_listed`` is sale_ebay's stored flag (Active / Out Of Stock);
+        ``fb_listed`` is this module's stored flag (draft / listed /
+        renewal_due). Both stored, so the domain is server-side and exact.
+        Raises the usual field error when sale_ebay is not installed.
+        """
+        self._require()
+        return self.client.search_read(
+            "product.template",
+            [["ebay_listed", "=", True], ["fb_listed", "=", False]],
+            fields=_GAP_FIELDS, limit=limit, order="name",
+        )
+
+    def fb_not_on_ebay(self, limit: int = 50, include_temp: bool = True) -> list[dict]:
+        """Products with an open FB listing that are not live on eBay.
+
+        Temp items (``fb_temp``) are one-off Marketplace products; they are
+        included by default so the digest can flag them, and each row carries
+        ``fb_temp`` so the caller can say so.
+        """
+        self._require()
+        domain = [["fb_listed", "=", True], ["ebay_listed", "=", False]]
+        if not include_temp:
+            domain.append(["fb_temp", "=", False])
+        return self.client.search_read(
+            "product.template", domain,
+            fields=_GAP_FIELDS, limit=limit, order="name",
+        )
+
+    def channel_gaps(self, limit: int = 50) -> dict:
+        """Both gap lists plus counts — the Monday digest payload."""
+        ebay_only = self.ebay_live_not_on_fb(limit=limit)
+        fb_only = self.fb_not_on_ebay(limit=limit)
+        temp = sum(1 for r in fb_only if r.get("fb_temp"))
+        return {
+            "summary": (
+                f"{len(ebay_only)} live on eBay but not on FB; "
+                f"{len(fb_only)} on FB but not on eBay ({temp} temp item(s))"
+            ),
+            "ebay_live_not_on_fb": ebay_only,
+            "fb_not_on_ebay": fb_only,
+        }
+
     def get_images(self, listing_id: int) -> list[dict]:
         """Photo rows attached to a listing, in display order.
 
@@ -297,6 +368,116 @@ class FbMarketplaceOps(BaseOps):
             "listing": record,
         }
 
+    def create_from_product(
+        self,
+        product_tmpl_id: int,
+        generate: bool = True,
+        condition: str = "refurbished",
+        location_id: Optional[int] = None,
+        shippable: Optional[bool] = None,
+    ) -> dict:
+        """Draft an FB listing for a catalog / eBay-live product (``fb <ref>``).
+
+        Refuses when the product already has an open listing (returns it
+        instead, ``created: False``) so ``fb <ref>`` twice never doubles up.
+        Seeds the description from ``description_sale`` and, with
+        ``generate``, runs the module's AI copy over it. The result carries
+        what the operator needs to review the draft: on-hand quantity and,
+        when sale_ebay is installed, the eBay price so a gap against the FB
+        price (``list_price``, Q8) can be flagged.
+        """
+        self._require()
+        rows = self.client.read(
+            "product.template", [product_tmpl_id], fields=_PRODUCT_FIELDS)
+        if not rows:
+            raise ValueError(f"No product.template with id {product_tmpl_id}")
+        tmpl = rows[0]
+        ebay: dict[str, Any] = {}
+        try:
+            erows = self.client.read(
+                "product.template", [product_tmpl_id], fields=_EBAY_FIELDS)
+            ebay = erows[0] if erows else {}
+        except OdooError:
+            ebay = {}  # sale_ebay not installed
+
+        existing = self.search(
+            [["product_tmpl_id", "=", product_tmpl_id], ["state", "in", OPEN_STATES]],
+            limit=1, order="id desc")
+        if existing:
+            listing = self.get(existing[0]["id"])
+            return {
+                "summary": (
+                    f"'{tmpl['name']}' already has open FB listing "
+                    f"#{listing['id']} ({listing.get('state')}); nothing created."
+                ),
+                "created": False,
+                "listing": listing,
+                **self._channel_facts(tmpl, ebay),
+            }
+
+        extra: dict[str, Any] = {}
+        if location_id:
+            extra["location_id"] = int(location_id)
+        if shippable is not None:
+            extra["shippable"] = bool(shippable)
+        created = self.create_listing(
+            product_tmpl_id, condition=condition,
+            description=_plain_text(tmpl.get("description_sale")) or None,
+            **extra)
+        listing = created["listing"]
+        notes: list[str] = []
+        generated = False
+        if generate:
+            try:
+                gen = self.generate_content(listing["id"])
+                listing = gen["listing"]
+                generated = True
+            except OdooError as exc:
+                notes.append(f"AI copy not generated: {exc}")
+        facts = self._channel_facts(tmpl, ebay)
+        if facts["ebay_price_gap"] is not None:
+            notes.append(
+                f"eBay price {facts['ebay_price']} vs FB price {facts['fb_price']} "
+                f"(gap {facts['ebay_price_gap']:+.2f})")
+        if not facts["on_hand"]:
+            notes.append("No stock on hand.")
+        return {
+            "summary": (
+                f"Draft FB listing #{listing['id']} created for '{tmpl['name']}'"
+                + (" with AI copy" if generated else "")
+                + ". Review, then post it to Facebook."
+            ),
+            "created": True,
+            "ai_generated": generated,
+            "listing": listing,
+            "notes": notes,
+            **facts,
+        }
+
+    @staticmethod
+    def _channel_facts(tmpl: dict, ebay: dict) -> dict:
+        """On-hand, prices and the eBay price gap for a draft review."""
+        fb_price = tmpl.get("list_price") or 0.0
+        ebay_price = ebay.get("ebay_fixed_price") or None
+        live = bool(ebay.get("ebay_listed"))
+        gap = None
+        if live and ebay_price and _differs(ebay_price, fb_price):
+            gap = round(float(ebay_price) - float(fb_price), 2)
+        return {
+            "product": {
+                "id": tmpl.get("id"), "name": tmpl.get("name"),
+                "default_code": tmpl.get("default_code") or "",
+                "fb_temp": bool(tmpl.get("fb_temp")),
+            },
+            "on_hand": tmpl.get("qty_available") or 0.0,
+            "fb_price": fb_price,
+            "ebay_live": live,
+            "ebay_status": ebay.get("ebay_listing_status") or "",
+            "ebay_price": ebay_price,
+            "ebay_url": ebay.get("ebay_url") or "",
+            "ebay_price_gap": gap,
+        }
+
     def set_price(self, listing_id: int, price: float) -> dict:
         """Set a listing's price by writing the product template's list price.
 
@@ -350,9 +531,64 @@ class FbMarketplaceOps(BaseOps):
                 )
         return self.run_action(listing_id, "action_mark_listed")
 
-    def mark_sold(self, listing_id: int) -> dict:
-        """Close a listing as sold."""
-        return self.run_action(listing_id, "action_mark_sold")
+    def mark_sold(
+        self,
+        listing_id: int,
+        qty: float = 1.0,
+        price: Optional[float] = None,
+        invoice: bool = False,
+        close: Optional[bool] = None,
+        ref: Optional[str] = None,
+    ) -> dict:
+        """Record a Facebook sale on a listing (``fb_record_sale``).
+
+        Moves ``qty`` units out of stock at ``price`` each (tax-inclusive
+        buyer price; ``None`` = list price, ``0`` = giveaway). ``invoice=True``
+        also raises a paid sales order — the server requires the "Record
+        Sales" group for that. ``close`` forces the listing closed / kept
+        live; ``None`` lets the module decide (temp items always close, a
+        catalog product closes at zero stock). ``ref`` is an idempotency key:
+        the same ref twice returns ``duplicate: True`` and moves nothing.
+        The plain ``action_mark_sold`` button is no longer used — it closes
+        the listing without a sale row.
+        """
+        kwargs: dict[str, Any] = {"qty": float(qty), "invoice": bool(invoice)}
+        if price is not None:
+            kwargs["price"] = float(price)
+        if close is not None:
+            kwargs["close"] = bool(close)
+        if ref:
+            kwargs["ref"] = str(ref)
+        result = self.run_action(listing_id, "fb_record_sale", **kwargs)
+        sale = result["returned"] if isinstance(result["returned"], dict) else {}
+        record = result["record"]
+        if sale.get("duplicate"):
+            summary = f"Ref {ref!r} already recorded on listing #{listing_id}; nothing moved."
+        else:
+            summary = (
+                f"Sale recorded on '{record.get('name')}': {sale.get('qty', qty)} × "
+                f"{sale.get('price', price if price is not None else record.get('price'))}"
+                + (f", order {sale.get('sale_order')}" if sale.get("sale_order") else "")
+                + ("; listing closed" if sale.get("closed") else
+                   f"; {sale.get('remaining', '?')} left, listing stays live")
+            )
+        return {"summary": summary, "sale": sale, "listing": record}
+
+    def record_sale(self, listing_id: int) -> dict:
+        """After the fact: invoice every cash sale on a listing that has no
+        order yet (``fb_invoice_sales``, one paid order per sale at its own
+        price, no delivery). Needs the "Record Sales" group."""
+        result = self.run_action(listing_id, "fb_invoice_sales")
+        out = result["returned"] if isinstance(result["returned"], dict) else {}
+        orders = out.get("sale_orders") or []
+        return {
+            "summary": (
+                f"{len(out.get('sale_ids') or [])} sale(s) on listing #{listing_id} "
+                f"invoiced: {', '.join(orders) or '-'}"
+            ),
+            "result": out,
+            "listing": result["record"],
+        }
 
     def mark_renewed(self, listing_id: int) -> dict:
         """Record that the listing was renewed on Facebook, resetting the clock."""
@@ -436,6 +672,15 @@ class FbMarketplaceOps(BaseOps):
             "renewal_due_soon": due_soon,
             "stale_30d": stale,
         }
+
+
+def _plain_text(value: Any) -> str:
+    """Strip HTML tags/entities from a rich-text field (``description_sale``)."""
+    if not value:
+        return ""
+    text = re.sub(r"<br\s*/?>|</p>|</div>", "\n", str(value))
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
 
 
 def _differs(a: Any, b: Any, tolerance: float = 0.01) -> bool:

@@ -559,6 +559,17 @@ class EbayListingOps(BaseOps):
                     notes.append(f"eBay condition code {code} not found on this database.")
         defaults.update(fill)
         defaults.update(vals or {})
+        # Q11/Q13: stock sync is only right when eBay's quantity IS the
+        # on-hand quantity. An operator quantity that differs from stock
+        # (a partial lot, a reserved unit) would be overwritten by the next
+        # sync, so it turns sync off and says so.
+        if (vals or {}).get("ebay_quantity") is not None and defaults.get("ebay_sync_stock"):
+            on_hand = max(int(tmpl.get("virtual_available") or 0), 0)
+            if int(vals["ebay_quantity"]) != on_hand:
+                defaults["ebay_sync_stock"] = False
+                notes.append(
+                    f"Quantity {int(vals['ebay_quantity'])} differs from stock on hand "
+                    f"({on_hand}); eBay stock sync left OFF for this product.")
         if description is None and fb.get("description"):
             description = fb["description"]
         state = self.set_listing_fields(product_tmpl_id, defaults, description)
