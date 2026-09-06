@@ -224,6 +224,56 @@ class FbMarketplaceOps(BaseOps):
             limit=limit,
         )
 
+    def resolve_product(self, ref: str, limit: int = 10) -> dict:
+        """Turn an operator-typed reference into a ``product.template`` id.
+
+        The ``fb <ref>`` direction (catalog / eBay → FB): a bare integer is a
+        **product.template id** (unlike ``ebay.resolve_item``, where it is an
+        FB listing id); ``sku XYZ`` / an exact ``default_code`` match next;
+        anything else is a case-insensitive name search returning
+        ``candidates``, with ``product_tmpl_id`` set only on a unique hit.
+        """
+        self._require()
+        text = str(ref or "").strip()
+        out: dict[str, Any] = {"ref": text, "kind": "none", "product_tmpl_id": None,
+                               "candidates": [], "summary": ""}
+        if not text:
+            out["summary"] = "Empty reference."
+            return out
+        m = re.fullmatch(r"(?:product\s*|#)?(\d+)", text, re.IGNORECASE)
+        if m:
+            rows = self.client.search_read(
+                "product.template", [["id", "=", int(m.group(1))]],
+                fields=_GAP_FIELDS, limit=1)
+            if rows:
+                out.update(kind="id", product_tmpl_id=rows[0]["id"], candidates=rows,
+                           summary=f"Product #{rows[0]['id']} {rows[0]['name']}")
+            else:
+                out["summary"] = f"No product with id {m.group(1)}."
+            return out
+        sku = re.sub(r"^sku\s*:?\s*", "", text, flags=re.IGNORECASE).strip()
+        rows = self.client.search_read(
+            "product.template", [["default_code", "=ilike", sku]],
+            fields=_GAP_FIELDS, limit=2)
+        if len(rows) == 1:
+            out.update(kind="sku", product_tmpl_id=rows[0]["id"], candidates=rows,
+                       summary=f"Product #{rows[0]['id']} {rows[0]['name']} (SKU {sku})")
+            return out
+        rows = self.client.search_read(
+            "product.template",
+            ["|", ["name", "ilike", text], ["default_code", "ilike", text]],
+            fields=_GAP_FIELDS, limit=limit, order="name")
+        out["candidates"] = rows
+        if len(rows) == 1:
+            out.update(kind="name", product_tmpl_id=rows[0]["id"],
+                       summary=f"Product #{rows[0]['id']} {rows[0]['name']}")
+        elif rows:
+            out.update(kind="ambiguous",
+                       summary=f"{len(rows)} products match {text!r}; pick one by id.")
+        else:
+            out["summary"] = f"No product matches {text!r}."
+        return out
+
     def ebay_live_not_on_fb(self, limit: int = 50) -> list[dict]:
         """Products live on eBay with no open FB listing (multichannel gap).
 

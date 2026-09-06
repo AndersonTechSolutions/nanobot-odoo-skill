@@ -271,6 +271,23 @@ class TestFbMarketplace:
         assert out["summary"].startswith("1 live on eBay but not on FB; 2 on FB")
         assert "(1 temp item(s))" in out["summary"]
 
+    def test_resolve_product_bare_int_is_a_product_id(self, fb, mock_client):
+        """Opposite of ebay.resolve_item, where a bare int is an FB listing."""
+        mock_client._models.execute_kw.return_value = [{"id": 2572, "name": "Bose A20"}]
+        out = fb.resolve_product("2572")
+        assert out["kind"] == "id" and out["product_tmpl_id"] == 2572
+        assert _calls(mock_client)[0][2][0] == [["id", "=", 2572]]
+
+    def test_resolve_product_sku_then_name(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [],                                              # exact sku
+            [{"id": 1, "name": "Drum A"}, {"id": 2, "name": "Drum B"}],
+        ]
+        out = fb.resolve_product("drum")
+        assert out["kind"] == "ambiguous" and out["product_tmpl_id"] is None
+        assert len(out["candidates"]) == 2
+        assert _calls(mock_client)[0][2][0] == [["default_code", "=ilike", "drum"]]
+
     def test_create_from_product_refuses_when_an_open_listing_exists(self, fb, mock_client):
         tmpl = {"id": 42, "name": "Bose A20", "list_price": 150.0, "qty_available": 1.0,
                 "type": "product", "description_sale": False, "fb_temp": False}

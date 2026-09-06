@@ -281,6 +281,7 @@
     "fb_marketplace.needs_content",
     "fb_marketplace.renewal_due",
     "fb_marketplace.repricing_candidates",
+    "fb_marketplace.resolve_product",
     "fb_marketplace.search",
     "fb_marketplace.search_computed",
     "fb_marketplace.sold_listings",
