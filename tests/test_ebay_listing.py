@@ -363,6 +363,42 @@ class TestStageListing:
         assert vals["ebay_fixed_price"] == 99.0
         assert vals["ebay_best_offer"] is False
 
+    def test_operator_quantity_matching_stock_keeps_sync_on(self, ops, mock_client):
+        _stage_router(mock_client, BASE_TMPL)
+        out = ops.stage_listing(7, vals={"ebay_quantity": 3})
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["ebay_sync_stock"] is True
+        assert vals["ebay_quantity"] == 3
+        assert not any("sync left OFF" in n for n in out["notes"])
+
+    def test_operator_quantity_differing_from_stock_turns_sync_off(self, ops, mock_client):
+        """Q11: sync would overwrite a deliberate partial quantity."""
+        _stage_router(mock_client, BASE_TMPL)
+        out = ops.stage_listing(7, vals={"ebay_quantity": 1})
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["ebay_sync_stock"] is False
+        assert vals["ebay_quantity"] == 1
+        assert any("sync left OFF" in n for n in out["notes"])
+
+    def test_operator_quantity_string_is_normalised_once(self, ops, mock_client):
+        _stage_router(mock_client, BASE_TMPL)
+        ops.stage_listing(7, vals={"ebay_quantity": "3.0"})
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["ebay_quantity"] == 3 and vals["ebay_sync_stock"] is True
+
+    def test_operator_quantity_garbage_is_refused_before_any_write(self, ops, mock_client):
+        _stage_router(mock_client, BASE_TMPL)
+        with pytest.raises(ValueError, match="whole number"):
+            ops.stage_listing(7, vals={"ebay_quantity": "three"})
+        assert not _by(mock_client, TMPL, "ebay_wizard_save")
+
+    def test_operator_quantity_on_consumable_adds_no_sync_note(self, ops, mock_client):
+        _stage_router(mock_client, dict(BASE_TMPL, type="consu"))
+        out = ops.stage_listing(7, vals={"ebay_quantity": 5})
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert "ebay_sync_stock" not in vals
+        assert not any("sync left OFF" in n for n in out["notes"])
+
     def test_fb_listing_supplies_condition_description_title_and_photos(self, ops, mock_client):
         fb = {"id": 12, "name": "Optiplex - like new", "description": "Runs great\n\nNo box",
               "condition": "like_new", "price": 129.0, "product_tmpl_id": [7, "Dell"]}
@@ -560,6 +596,30 @@ class TestRevise:
         out = ops.revise_stage(7, {"ebay_fixed_price": 99.0})
         assert _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][2] is None
         assert out["summary"] == "Nothing changed."
+
+    def test_stage_refresh_description_adds_flag_only_when_set(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {
+            "success": True, "hash": "h", "can_revise": True,
+            "diff": [{"field": "description", "label": "Description (rendered)",
+                      "old": "as published", "new": "rendered 1a2b3c4d", "pushable": True}],
+            "warnings": []}})
+        out = ops.revise_stage(7, None, refresh_description=True)
+        call = _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0]
+        assert list(call[2]) == [[7], {}, None, True]
+        assert "Description (rendered)" in out["summary"] and "Revise ready" in out["summary"]
+        ops.revise_stage(7, None)
+        assert len(_by(mock_client, TMPL, "ebay_wizard_revise_stage")[1][2]) == 3
+
+    def test_stage_summary_shows_reason_when_not_pushable(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {
+            "success": True, "hash": "h", "can_revise": False,
+            "diff": [{"field": "description", "label": "Description (rendered)",
+                      "old": "as published", "new": "none", "pushable": False,
+                      "reason": "needs both an eBay description and a description template"}],
+            "warnings": []}})
+        out = ops.revise_stage(7, None, refresh_description=True)
+        assert out["summary"].startswith("Nothing pushable")
+        assert "will NOT reach eBay: needs both" in out["summary"]
 
     def test_stage_refusal_is_a_dict(self, ops, mock_client):
         Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {

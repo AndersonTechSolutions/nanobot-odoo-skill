@@ -201,6 +201,219 @@ class TestFbMarketplace:
         assert "image" not in odoo_kwargs["fields"]
 
 
+    # ── Phase B: catalog → FB, sales, channel gaps ───────────────────
+
+    def test_mark_sold_records_a_sale_with_price_and_ref(self, fb, mock_client):
+        """mark_sold is fb_record_sale (a sale row + stock move), not the
+        bare action_mark_sold button that closes with no sale."""
+        sale = {"success": True, "duplicate": False, "sale_id": 3, "qty": 1.0,
+                "price": 120.0, "closed": True, "remaining": 0.0}
+        mock_client._models.execute_kw.side_effect = [
+            sale,
+            [{"id": 7, "name": "Bose A20", "state": "sold", "price": 150.0}],
+        ]
+        out = fb.mark_sold(7, price=120, invoice=True, ref="tg-99")
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "fb_record_sale", [[7]])
+        assert kw == {"qty": 1.0, "invoice": True, "price": 120.0, "ref": "tg-99"}
+        assert out["sale"] == sale, "plain result dicts must not be action-compressed"
+        assert "listing closed" in out["summary"]
+        assert "action_mark_sold" not in [c[1] for c in _calls(mock_client)]
+
+    def test_mark_sold_omits_unset_price_and_close(self, fb, mock_client):
+        """price=None must NOT reach the server (None → module treats as list
+        price only when absent; XML-RPC cannot marshal None anyway)."""
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "qty": 2.0, "price": 10.0, "closed": False, "remaining": 1.0},
+            [{"id": 7, "name": "Drum", "state": "listed", "price": 10.0}],
+        ]
+        out = fb.mark_sold(7, qty=2)
+        _, _, _, kw = _calls(mock_client)[0]
+        assert kw.pop("ref").startswith("auto-")   # always sent: retry-safe
+        assert kw == {"qty": 2.0, "invoice": False}
+        assert "stays live" in out["summary"]
+
+    def test_mark_sold_duplicate_ref_is_reported(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "duplicate": True, "sale_id": 3},
+            [{"id": 7, "name": "Drum", "state": "listed"}],
+        ]
+        out = fb.mark_sold(7, ref="tg-1")
+        assert "already recorded" in out["summary"]
+
+    def test_record_sale_invoices_after_the_fact(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "sale_ids": [1, 2], "sale_orders": ["S001", "S002"]},
+            [{"id": 7, "name": "Drum", "state": "sold"}],
+        ]
+        out = fb.record_sale(7)
+        assert _calls(mock_client)[0][1] == "fb_invoice_sales"
+        assert "2 sale(s)" in out["summary"] and "S002" in out["summary"]
+
+    def test_sale_rpcs_are_allowlisted_actions(self, fb):
+        assert {"fb_record_sale", "fb_invoice_sales"} <= fb.ALLOWED_ACTIONS
+
+    def test_channel_gap_domains_use_the_stored_flags(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = []
+        fb.ebay_live_not_on_fb()
+        fb.fb_not_on_ebay(include_temp=False)
+        calls = _calls(mock_client)
+        assert calls[0][0] == "product.template"
+        assert calls[0][2][0] == [["ebay_listed", "=", True], ["fb_listed", "=", False]]
+        assert calls[1][2][0] == [["fb_listed", "=", True], ["ebay_listed", "=", False],
+                                  ["fb_temp", "=", False]]
+
+    def test_channel_gaps_counts_temp_items(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [{"id": 1, "name": "A", "fb_temp": False}],
+            [{"id": 2, "name": "B", "fb_temp": True}, {"id": 3, "name": "C", "fb_temp": False}],
+            1, 2, 1,                                  # search_count totals
+        ]
+        out = fb.channel_gaps()
+        assert out["summary"].startswith("1 live on eBay but not on FB; 2 on FB")
+        assert "(1 temp item(s))" in out["summary"]
+        assert out["truncated"] is False
+
+    def test_channel_gaps_reports_true_totals_when_page_is_capped(self, fb, mock_client):
+        """Counts come from search_count, not len(page) (Monday digest)."""
+        mock_client._models.execute_kw.side_effect = [
+            [{"id": 1, "name": "A", "fb_temp": False}],   # capped page
+            [],
+            60, 0, 0,
+        ]
+        out = fb.channel_gaps(limit=1)
+        assert out["summary"].startswith("60 live on eBay but not on FB")
+        assert "showing the first 1" in out["summary"]
+        assert out["truncated"] is True and out["ebay_live_not_on_fb_count"] == 60
+
+    def test_resolve_product_bare_int_is_a_product_id(self, fb, mock_client):
+        """Opposite of ebay.resolve_item, where a bare int is an FB listing."""
+        mock_client._models.execute_kw.return_value = [{"id": 2572, "name": "Bose A20"}]
+        out = fb.resolve_product("2572")
+        assert out["kind"] == "id" and out["product_tmpl_id"] == 2572
+        assert _calls(mock_client)[0][2][0] == [["id", "=", 2572]]
+
+    def test_resolve_product_sku_then_name(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [],                                              # exact sku
+            [{"id": 1, "name": "Drum A"}, {"id": 2, "name": "Drum B"}],
+        ]
+        out = fb.resolve_product("drum")
+        assert out["kind"] == "ambiguous" and out["product_tmpl_id"] is None
+        assert len(out["candidates"]) == 2
+        assert _calls(mock_client)[0][2][0] == [["default_code", "=ilike", "drum"]]
+
+    def test_create_from_product_refuses_when_an_open_listing_exists(self, fb, mock_client):
+        tmpl = {"id": 42, "name": "Bose A20", "list_price": 150.0, "qty_available": 1.0,
+                "type": "product", "description_sale": False, "fb_temp": False}
+        mock_client._models.execute_kw.side_effect = [
+            [tmpl],                                   # product read
+            [{"ebay_listed": True, "ebay_fixed_price": 175.0,
+              "ebay_listing_status": "Active", "ebay_url": "https://ebay/x"}],
+            [{"id": 9, "state": "listed"}],           # open listing search
+            [{"id": 9, "name": "Bose A20", "state": "listed"}],
+        ]
+        out = fb.create_from_product(42)
+        assert out["created"] is False
+        assert out["listing"]["id"] == 9
+        assert out["ebay_price_gap"] == 25.0
+        assert "create" not in [c[1] for c in _calls(mock_client)]
+
+    def test_create_from_product_drafts_generates_and_flags_price_gap(self, fb, mock_client):
+        tmpl = {"id": 42, "name": "Bose A20", "list_price": 150.0, "qty_available": 1.0,
+                "type": "product", "description_sale": "<p>Aviation headset<br/>Bluetooth</p>",
+                "fb_temp": False, "default_code": "BOSE-A20"}
+        draft = {"id": 11, "name": "Bose A20", "state": "draft", "description": "Aviation headset"}
+        mock_client._models.execute_kw.side_effect = [
+            [tmpl],
+            [{"ebay_listed": True, "ebay_fixed_price": 175.0,
+              "ebay_listing_status": "Active", "ebay_url": ""}],
+            [],                                       # no open listing
+            [{"id": 42, "name": "Bose A20"}],         # create_listing name read
+            11,                                       # create
+            [draft],                                  # get after create
+            [],                                       # sibling open listings
+            True,                                     # action_generate_ai_content
+            [dict(draft, description="AI copy", ai_generated=True)],
+        ]
+        out = fb.create_from_product(42, condition="good")
+        calls = _calls(mock_client)
+        create = next(c for c in calls if c[1] == "create")
+        assert create[2][0]["description"] == "Aviation headset\nBluetooth"
+        assert create[2][0]["condition"] == "good"
+        assert "action_generate_ai_content" in [c[1] for c in calls]
+        assert out["created"] is True and out["ai_generated"] is True
+        assert out["listing"]["description"] == "AI copy"
+        assert out["ebay_price_gap"] == 25.0
+        assert any("gap +25.00" in n for n in out["notes"])
+        assert out["on_hand"] == 1.0
+
+    def test_create_from_product_without_sale_ebay_or_ai(self, fb, mock_client):
+        from odoo_skill.errors import OdooError
+        tmpl = {"id": 42, "name": "Drum", "list_price": 20.0, "qty_available": 0.0,
+                "type": "product", "description_sale": False, "fb_temp": False}
+        draft = {"id": 12, "name": "Drum", "state": "draft"}
+
+        def side_effect(db, uid, key, model, method, args, kw=None):
+            fields = (kw or {}).get("fields") or []
+            if method == "read" and model == "product.template" and "ebay_listed" in fields:
+                raise OdooError("Invalid field ebay_listed")
+            if method == "read" and model == "product.template":
+                return [tmpl]
+            if method == "search_read":
+                return []
+            if method == "create":
+                return 12
+            if method == "read":
+                return [draft]
+            raise AssertionError(method)
+
+        mock_client._models.execute_kw.side_effect = side_effect
+        out = fb.create_from_product(42, generate=False)
+        assert out["created"] is True and out["ai_generated"] is False
+        assert out["ebay_live"] is False and out["ebay_price_gap"] is None
+        assert "No stock on hand." in out["notes"]
+        assert "action_generate_ai_content" not in [c[1] for c in _calls(mock_client)]
+
+    def test_create_from_product_surfaces_access_errors_on_ebay_read(self, fb, mock_client):
+        from odoo_skill.errors import OdooAccessError
+        tmpl = {"id": 42, "name": "Drum", "list_price": 20.0, "qty_available": 0.0,
+                "type": "product", "description_sale": False, "fb_temp": False}
+        mock_client._models.execute_kw.side_effect = [
+            [tmpl], OdooAccessError("Access denied on product.template.read")]
+        with pytest.raises(OdooAccessError):
+            fb.create_from_product(42, generate=False)
+        assert "create" not in [c[1] for c in _calls(mock_client)]
+
+    def test_create_from_product_flags_duplicate_open_listing(self, fb, mock_client):
+        tmpl = {"id": 42, "name": "Drum", "list_price": 20.0, "qty_available": 1.0,
+                "type": "product", "description_sale": False, "fb_temp": False}
+        draft = {"id": 13, "name": "Drum", "state": "draft"}
+        mock_client._models.execute_kw.side_effect = [
+            [tmpl], [{"ebay_listed": False}], [],
+            [{"id": 42, "name": "Drum"}], 13, [draft],
+            [{"id": 12}],                              # a sibling appeared
+        ]
+        out = fb.create_from_product(42, generate=False)
+        assert out["created"] is True
+        assert any(n.startswith("DUPLICATE: ") and "#12" in n for n in out["notes"])
+
+    def test_resolve_product_limit_one_still_detects_ambiguity(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [], [{"id": 1, "name": "Drum A"}, {"id": 2, "name": "Drum B"}]]
+        out = fb.resolve_product("drum", limit=1)
+        assert out["kind"] == "ambiguous" and out["product_tmpl_id"] is None
+        assert len(out["candidates"]) == 1
+        assert _calls(mock_client)[1][3]["limit"] == 2
+
+    def test_price_gap_is_cent_exact(self):
+        from odoo_skill.models.fb_marketplace import _differs
+        assert _differs(150.0, 150.01) is True
+        assert _differs(100.0, 100.01) is True
+        assert _differs(19.99, 19.99) is False
+        assert _differs(0.1 + 0.2, 0.3) is False
+
+
 # ── Inbound shipments ────────────────────────────────────────────────
 
 

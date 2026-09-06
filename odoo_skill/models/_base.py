@@ -430,7 +430,9 @@ class BaseOps:
             "model": self.MODEL,
             "id": rec_id,
             "method": method,
-            "returned": raw if not isinstance(raw, dict) else _describe_action(raw),
+            # Only ir.actions dicts are compressed; a plain result dict (the
+            # fb_marketplace_lister sale RPCs) passes through untouched.
+            "returned": _describe_action(raw) if _is_action(raw) else raw,
             "record": record,
         }
 
@@ -499,6 +501,11 @@ class BaseOps:
             model, domain, fields=["display_name"], limit=limit
         )
         return [{"id": r["id"], "name": r["display_name"]} for r in rows]
+
+
+def _is_action(value: Any) -> bool:
+    """Whether a method result is an ``ir.actions.*`` descriptor."""
+    return isinstance(value, dict) and str(value.get("type", "")).startswith("ir.actions")
 
 
 def _describe_action(action: dict) -> dict:

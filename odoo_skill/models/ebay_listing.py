@@ -559,6 +559,26 @@ class EbayListingOps(BaseOps):
                     notes.append(f"eBay condition code {code} not found on this database.")
         defaults.update(fill)
         defaults.update(vals or {})
+        # Q11/Q13: stock sync is only right when eBay's quantity IS the
+        # on-hand quantity. An operator quantity that differs from stock
+        # (a partial lot, a reserved unit) would be overwritten by the next
+        # sync, so it turns sync off and says so.
+        if (vals or {}).get("ebay_quantity") is not None:
+            try:
+                qty = int(float(vals["ebay_quantity"]))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"ebay_quantity must be a whole number, got {vals['ebay_quantity']!r}")
+            if qty < 0:
+                raise ValueError("ebay_quantity cannot be negative")
+            defaults["ebay_quantity"] = qty
+            if defaults.get("ebay_sync_stock"):
+                on_hand = max(int(tmpl.get("virtual_available") or 0), 0)
+                if qty != on_hand:
+                    defaults["ebay_sync_stock"] = False
+                    notes.append(
+                        f"Quantity {qty} differs from stock on hand "
+                        f"({on_hand}); eBay stock sync left OFF for this product.")
         if description is None and fb.get("description"):
             description = fb["description"]
         state = self.set_listing_fields(product_tmpl_id, defaults, description)
@@ -654,7 +674,8 @@ class EbayListingOps(BaseOps):
             self.MODEL, "ebay_wizard_revise_status", [product_tmpl_id]))
 
     def revise_stage(self, product_tmpl_id: int, vals: Optional[dict] = None,
-                     description: Optional[str] = None) -> dict:
+                     description: Optional[str] = None,
+                     refresh_description: bool = False) -> dict:
         """Stage a change to a LIVE listing — writes Odoo, never eBay.
 
         ``vals`` keys: ``ebay_title``, ``ebay_item_condition_id``,
@@ -666,6 +687,13 @@ class EbayListingOps(BaseOps):
         pushability warnings, ``can_revise`` and the ``hash`` that
         :meth:`revise` must echo back. Re-runnable; a quantity change turns
         stock sync off server-side (reported as a warning).
+
+        ``refresh_description=True`` re-sends the body rendered from the
+        current description template even when nothing else changed (a
+        template edited before the first stage is otherwise invisible on
+        listings published before sale_ebay 1.39); the diff then carries a
+        ``description`` entry ("as published" → rendered) whose
+        pushability tells whether eBay will receive it.
         """
         self._require()
         clean = dict(vals or {})
@@ -675,8 +703,11 @@ class EbayListingOps(BaseOps):
         if description is not None:
             body = description if "<" in description and ">" in description \
                 else _text_to_html(description)
+        args = [[product_tmpl_id], clean, body]
+        if refresh_description:
+            args.append(True)  # sale_ebay >= 1.39.0 only; older servers reject the arg
         result = self._revise_result(self.client.execute(
-            self.MODEL, "ebay_wizard_revise_stage", [product_tmpl_id], clean, body))
+            self.MODEL, "ebay_wizard_revise_stage", *args))
         if result.get("success"):
             result["summary"] = self._revise_summary(result)
         else:
@@ -690,7 +721,12 @@ class EbayListingOps(BaseOps):
             return "Nothing changed."
         parts = []
         for d in diff:
-            mark = "" if d.get("pushable") else " (Odoo only)"
+            if d.get("pushable"):
+                mark = ""
+            elif d.get("reason"):
+                mark = f" (will NOT reach eBay: {d['reason']})"
+            else:
+                mark = " (Odoo only)"
             parts.append(f"{d.get('label')}: {d.get('old')!r} → {d.get('new')!r}{mark}")
         head = "Revise ready" if result.get("can_revise") else "Nothing pushable"
         return f"{head}: " + "; ".join(parts)
