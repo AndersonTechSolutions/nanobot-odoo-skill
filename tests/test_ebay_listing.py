@@ -597,6 +597,30 @@ class TestRevise:
         assert _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][2] is None
         assert out["summary"] == "Nothing changed."
 
+    def test_stage_refresh_description_adds_flag_only_when_set(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {
+            "success": True, "hash": "h", "can_revise": True,
+            "diff": [{"field": "description", "label": "Description (rendered)",
+                      "old": "as published", "new": "rendered 1a2b3c4d", "pushable": True}],
+            "warnings": []}})
+        out = ops.revise_stage(7, None, refresh_description=True)
+        call = _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0]
+        assert list(call[2]) == [[7], {}, None, True]
+        assert "Description (rendered)" in out["summary"] and "Revise ready" in out["summary"]
+        ops.revise_stage(7, None)
+        assert len(_by(mock_client, TMPL, "ebay_wizard_revise_stage")[1][2]) == 3
+
+    def test_stage_summary_shows_reason_when_not_pushable(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {
+            "success": True, "hash": "h", "can_revise": False,
+            "diff": [{"field": "description", "label": "Description (rendered)",
+                      "old": "as published", "new": "none", "pushable": False,
+                      "reason": "needs both an eBay description and a description template"}],
+            "warnings": []}})
+        out = ops.revise_stage(7, None, refresh_description=True)
+        assert out["summary"].startswith("Nothing pushable")
+        assert "will NOT reach eBay: needs both" in out["summary"]
+
     def test_stage_refusal_is_a_dict(self, ops, mock_client):
         Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {
             "success": False, "error": "not_live", "message": "Not live on eBay."}})
