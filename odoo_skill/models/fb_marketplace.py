@@ -622,11 +622,14 @@ class FbMarketplaceOps(BaseOps):
         invoice: bool = False,
         close: Optional[bool] = None,
         ref: Optional[str] = None,
+        b2b: bool = False,
     ) -> dict:
         """Record a Facebook sale on a listing (``fb_record_sale``).
 
-        Moves ``qty`` units out of stock at ``price`` each (tax-inclusive
-        buyer price; ``None`` = list price, ``0`` = giveaway). ``invoice=True``
+        Moves ``qty`` units out of stock at ``price`` each (``None`` = list
+        price, ``0`` = giveaway). Marketplace buyers pay no sales tax, so the
+        invoice carries ``price`` only; ``b2b=True`` marks a business sale
+        whose product taxes are charged on top. ``invoice=True``
         also raises a paid sales order — the server requires the "Record
         Sales" group for that. ``close`` forces the listing closed / kept
         live; ``None`` lets the module decide (temp items always close, a
@@ -643,6 +646,8 @@ class FbMarketplaceOps(BaseOps):
         # Always send a ref: the transport retries lost responses, and only
         # a stable ref makes the second attempt a no-op on the server.
         kwargs["ref"] = str(ref) if ref else f"auto-{uuid.uuid4().hex[:16]}"
+        if b2b:
+            kwargs["b2b"] = True
         result = self.run_action(listing_id, "fb_record_sale", **kwargs)
         sale = result["returned"] if isinstance(result["returned"], dict) else {}
         record = result["record"]
@@ -652,6 +657,7 @@ class FbMarketplaceOps(BaseOps):
             summary = (
                 f"Sale recorded on '{record.get('name')}': {sale.get('qty', qty)} × "
                 f"{sale.get('price', price if price is not None else record.get('price'))}"
+                + (" (B2B, taxed)" if sale.get("b2b") else "")
                 + (f", order {sale.get('sale_order')}" if sale.get("sale_order") else "")
                 + ("; listing closed" if sale.get("closed") else
                    f"; {sale.get('remaining', '?')} left, listing stays live")

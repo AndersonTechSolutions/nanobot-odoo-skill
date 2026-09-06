@@ -233,6 +233,19 @@ class TestFbMarketplace:
         assert kw == {"qty": 2.0, "invoice": False}
         assert "stays live" in out["summary"]
 
+    def test_mark_sold_b2b_flag_only_when_set(self, fb, mock_client):
+        """Consumer sales are tax-free by default; b2b is opt-in and shows in
+        the summary so the operator sees the tax was added."""
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "qty": 1.0, "price": 100.0, "b2b": True, "closed": True,
+             "remaining": 0.0, "sale_order": "S00042"},
+            [{"id": 7, "name": "Switch", "state": "sold", "price": 100.0}],
+        ]
+        out = fb.mark_sold(7, price=100, invoice=True, ref="tg-1", b2b=True)
+        _, _, _, kw = _calls(mock_client)[0]
+        assert kw["b2b"] is True
+        assert "B2B, taxed" in out["summary"]
+
     def test_mark_sold_duplicate_ref_is_reported(self, fb, mock_client):
         mock_client._models.execute_kw.side_effect = [
             {"success": True, "duplicate": True, "sale_id": 3},
