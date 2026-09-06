@@ -51,9 +51,19 @@ from ._base import BaseOps, utc_stamp
 
 logger = logging.getLogger("odoo_skill")
 
+#: Package weight (lb, core ``weight``) and box dimensions (inches, sale_ebay
+#: 1.40 ``ebay_pkg_*_in``) plus the last scale read (fb_marketplace_lister
+#: 4.2 ``weight_measured_on``). Related onto the listing from its product;
+#: dropped by ``_existing()`` on databases without those module versions.
+_PACKAGE_FIELDS = [
+    "weight", "ebay_pkg_length_in", "ebay_pkg_width_in", "ebay_pkg_height_in",
+    "weight_measured_on",
+]
+
 _LIST_FIELDS = [
     "id", "name", "product_tmpl_id", "state", "condition", "price",
     "suggested_price", "listed_date", "renewal_date", "listing_url",
+    *_PACKAGE_FIELDS,
 ]
 
 _DETAIL_FIELDS = _LIST_FIELDS + [
@@ -64,6 +74,10 @@ _DETAIL_FIELDS = _LIST_FIELDS + [
     # on databases still running an older module.
     "sold_price", "sold_qty", "sale_count", "can_record_sale",
 ]
+
+#: ``product.template`` model the package RPCs live on; the listing's own
+#: ``fb_read_scale`` / ``fb_set_package`` delegate to it.
+_PRODUCT_MODEL = "product.template"
 
 #: ``product.template`` fields read by :meth:`FbMarketplaceOps.create_from_product`.
 _PRODUCT_FIELDS = [
@@ -125,6 +139,8 @@ class FbMarketplaceOps(BaseOps):
         # "Record Sales" group for the invoice path
         "fb_record_sale",
         "fb_invoice_sales",
+        # package (4.2): read the product's weight from a Ventor scale
+        "action_read_scale",
     })
 
     # ── Reads ────────────────────────────────────────────────────────
@@ -740,6 +756,109 @@ class FbMarketplaceOps(BaseOps):
         }
 
     # ── Summary ──────────────────────────────────────────────────────
+
+    # ── Package: weight from a scale, box dimensions ─────────────────
+
+    def scales(self) -> list[dict]:
+        """Ventor scales currently online (``product.template.fb_scales``).
+
+        Each row is ``{"id", "name", "computer"}``. Model-level RPC — called
+        with no ids list (see :meth:`BaseOps._call_model`). There is no
+        default scale on purpose: the caller shows this list and the
+        operator picks one per read.
+        """
+        self._require()
+        rows = self.client.execute(_PRODUCT_MODEL, "fb_scales")
+        return [dict(r) for r in rows] if isinstance(rows, list) else []
+
+    def _package_target(self, listing_id: Optional[int],
+                        product_id: Optional[int]) -> tuple[str, int]:
+        """``(model, id)`` the package RPC runs on: the listing when given
+        (it delegates to its product), else the product template."""
+        if listing_id:
+            return self.MODEL, int(listing_id)
+        if product_id:
+            return _PRODUCT_MODEL, int(product_id)
+        raise ValueError("Pass listing_id (fb.marketplace.listing) or "
+                         "product_id (product.template).")
+
+    def read_scale(self, listing_id: Optional[int] = None,
+                   product_id: Optional[int] = None,
+                   scales_id: Optional[int] = None, write: bool = True) -> dict:
+        """Weigh the item on a Ventor scale and store the result
+        (``fb_read_scale``).
+
+        *scales_id* is one of :meth:`scales`; omitted, the server uses the
+        product's remembered scale or the API user's default and fails
+        with a plain error when it has neither. Returns the reading
+        (``weight`` in the database's weight unit, ``uom``, ``scales``,
+        ``measured_on``); with *write* the product's ``weight`` and
+        ``weight_measured_on`` are updated in the same call.
+        """
+        model, rec_id = self._package_target(listing_id, product_id)
+        kwargs: dict[str, Any] = {"write": bool(write)}
+        if scales_id:
+            kwargs["scales_id"] = int(scales_id)
+        result = self.client.execute(model, "fb_read_scale", [rec_id], **kwargs)
+        reading = dict(result) if isinstance(result, dict) else {}
+        weight = reading.get("weight")
+        uom = reading.get("uom") or "lb"
+        return {
+            "summary": (
+                f"{weight} {uom} on scale {reading.get('scales') or scales_id or '?'}"
+                + (" — written to the product." if write else " (not written).")
+                if weight is not None else "Scale returned no reading."
+            ),
+            "reading": reading,
+            "written": bool(write) and weight is not None,
+            "target": {"model": model, "id": rec_id},
+        }
+
+    def set_package(self, listing_id: Optional[int] = None,
+                    product_id: Optional[int] = None,
+                    weight: Optional[float] = None,
+                    length: Optional[float] = None,
+                    width: Optional[float] = None,
+                    height: Optional[float] = None) -> dict:
+        """Write package weight (lb) and box dimensions (inches)
+        (``fb_set_package``).
+
+        Any value left ``None`` keeps what the product already has, so a
+        weight-only or dims-only update never zeroes the other half.
+        Negative values are refused before any RPC.
+        """
+        model, rec_id = self._package_target(listing_id, product_id)
+        given = {"weight": weight, "length": length, "width": width, "height": height}
+        for key, val in given.items():
+            if val is None:
+                continue
+            try:
+                given[key] = float(val)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number, got {val!r}")
+            if given[key] < 0:
+                raise ValueError(f"{key} cannot be negative")
+        if all(v is None for v in given.values()):
+            raise ValueError("Pass at least one of weight, length, width, height.")
+        if any(v is None for v in given.values()):
+            fields = ["weight", "ebay_pkg_length_in", "ebay_pkg_width_in",
+                      "ebay_pkg_height_in"]
+            current = self.client.read(model, [rec_id], fields=fields)
+            cur = current[0] if current else {}
+            for key, field in zip(given, fields):
+                if given[key] is None:
+                    given[key] = float(cur.get(field) or 0.0)
+        self.client.execute(
+            model, "fb_set_package", [rec_id],
+            given["weight"], given["length"], given["width"], given["height"])
+        return {
+            "summary": (
+                f"Package on {model} #{rec_id}: {given['weight']:g} lb, "
+                f"{given['length']:g}×{given['width']:g}×{given['height']:g} in."
+            ),
+            "package": given,
+            "target": {"model": model, "id": rec_id},
+        }
 
     def marketplace_summary(self) -> dict:
         """Pipeline counts plus the renewal queue — the daily Marketplace view."""

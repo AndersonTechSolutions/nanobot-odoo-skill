@@ -559,6 +559,9 @@ _WRITE_EXACT = frozenset({
     # BaseOps.update / BaseOps.create are inherited by every namespace;
     # "create" is caught by the prefix, bare "update" needs naming here.
     "update",
+    # fb_marketplace.read_scale reads a Ventor scale AND writes the weight
+    # to the product (write=True by default) — a write despite its name.
+    "read_scale",
 })
 
 #: Underscore-terminated prefixes for verb_object method names that mutate.

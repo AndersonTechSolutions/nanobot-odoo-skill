@@ -24,8 +24,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from odoo_skill.models._base import OdooActionNotAllowedError  # noqa: E402
+from odoo_skill.errors import OdooError  # noqa: E402
 from odoo_skill.models.ebay_listing import (  # noqa: E402
-    EbayListingOps, _text_to_html,
+    EbayListingOps, _parse_dims, _parse_package_text, _strip_fb_pickup,
+    _text_to_html,
 )
 from tests.test_new_connectors import _calls, _ready  # noqa: E402
 
@@ -878,3 +880,290 @@ class TestSpecifics:
             "success": False, "error": "access"}})
         assert ops.set_specifics(7, {"Type": "Headset"})["summary"] == "Refused: access"
 
+
+
+# ── package (weight / dims) + policy resolver ────────────────────────
+
+
+class TestParsePackageText:
+
+    def test_lb_and_inches(self):
+        out = _parse_package_text(["Weight: 12.5 lb. Dimensions: 18 x 12 x 6 in"])
+        assert out["weight_lb"] == 12.5
+        assert out["dims"] == (18.0, 12.0, 6.0)
+
+    def test_oz_and_lb_oz_and_kg_convert_to_lb(self):
+        assert _parse_package_text(["weight 36oz"])["weight_lb"] == 2.25
+        assert _parse_package_text(["Weighs 2 lb 4 oz"])["weight_lb"] == 2.25
+        assert _parse_package_text(["weight 3.2 kg"])["weight_lb"] == 7.05
+
+    def test_font_weight_css_and_bare_numbers_do_not_match(self):
+        html_desc = "<style>p{font-weight:700}</style><p>Ships in a 36oz mug</p>"
+        out = _parse_package_text([html_desc])
+        assert out["weight_lb"] is None and out["dims"] is None
+
+    def test_resolution_triplet_is_not_a_box_but_unit_or_cue_is(self):
+        assert _parse_package_text(["1920 x 1080 x 60Hz"])["dims"] is None
+        assert _parse_package_text(['Box 20" × 14" × 8"'])["dims"] == (20.0, 14.0, 8.0)
+        assert _parse_package_text(["Package size: 20 x 14 x 8"])["dims"] == (20.0, 14.0, 8.0)
+
+    def test_cm_converts_to_inches(self):
+        assert _parse_package_text(["size 40 x 30 x 20 cm"])["dims"] == (15.75, 11.81, 7.87)
+
+    def test_first_text_with_a_value_wins_per_value(self):
+        out = _parse_package_text(["weight: 3 lb", "weight: 9 lb, dims 1 x 2 x 3 in"])
+        assert out["weight_lb"] == 3.0 and out["dims"] == (1.0, 2.0, 3.0)
+
+    def test_non_strings_are_skipped(self):
+        assert _parse_package_text([False, None, ""])["weight_lb"] is None
+
+
+class TestParseDims:
+
+    @pytest.mark.parametrize("value", ["18x12x6", "18 × 12 × 6 in", '18" x 12" x 6"',
+                                       [18, "12", 6.0], (18, 12, 6)])
+    def test_accepted_forms(self, value):
+        assert _parse_dims(value) == (18.0, 12.0, 6.0)
+
+    @pytest.mark.parametrize("value", ["18x12", "a x b x c", [1, 2], "0x1x2"])
+    def test_rejected_forms(self, value):
+        with pytest.raises(ValueError, match="dims"):
+            _parse_dims(value)
+
+    def test_none_passes_through(self):
+        assert _parse_dims(None) is None
+
+
+class TestStripFbPickup:
+
+    def test_trailing_sentence_pair(self):
+        assert _strip_fb_pickup("Runs great.\n\nNo box. Local pickup. Message with any questions.") \
+            == "Runs great.\n\nNo box."
+
+    def test_own_line_variants(self):
+        assert _strip_fb_pickup("Runs great.\nLocal pickup only.\n") == "Runs great."
+        assert _strip_fb_pickup("Runs great. Local pickup! Message me with any questions.") == "Runs great."
+
+    def test_mid_sentence_mention_is_kept(self):
+        text = "Local pickup available at our shop in Clearwater. Tested."
+        assert _strip_fb_pickup(text) == text
+
+    def test_empty(self):
+        assert _strip_fb_pickup("") == ""
+
+
+PKG_TMPL = dict(BASE_TMPL, weight=0.0, ebay_pkg_length_in=0.0, ebay_pkg_width_in=0.0,
+                ebay_pkg_height_in=0.0, description_sale=False, ebay_description=False)
+
+
+class TestStagePackage:
+
+    def test_caller_weight_and_dims_go_through_the_wizard_save(self, ops, mock_client):
+        _stage_router(mock_client, PKG_TMPL)
+        out = ops.stage_listing(7, weight_lb=12.5, dims="18x12x6")
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["weight"] == 12.5
+        assert (vals["ebay_pkg_length_in"], vals["ebay_pkg_width_in"],
+                vals["ebay_pkg_height_in"]) == (18.0, 12.0, 6.0)
+        assert out["package"] == {
+            "weight_lb": 12.5, "length_in": 18.0, "width_in": 12.0, "height_in": 6.0,
+            "source": "field", "weight_source": "field", "dims_source": "field"}
+        assert not any("missing" in n for n in out["notes"])
+
+    def test_existing_fields_are_reported_and_not_rewritten(self, ops, mock_client):
+        tmpl = dict(PKG_TMPL, weight=4.0, ebay_pkg_length_in=10.0,
+                    ebay_pkg_width_in=8.0, ebay_pkg_height_in=6.0)
+        _stage_router(mock_client, tmpl)
+        out = ops.stage_listing(7)
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert "weight" not in vals and "ebay_pkg_length_in" not in vals
+        assert out["package"]["source"] == "field"
+        assert out["package"]["weight_lb"] == 4.0
+
+    def test_description_fallback_applies_and_notes(self, ops, mock_client):
+        tmpl = dict(PKG_TMPL, description_sale="Weight: 12 lb. Box 18 x 12 x 6 in.")
+        _stage_router(mock_client, tmpl)
+        out = ops.stage_listing(7)
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["weight"] == 12.0
+        assert vals["ebay_pkg_height_in"] == 6.0
+        assert out["package"]["source"] == "description"
+        assert any("taken from the description" in n for n in out["notes"])
+
+    def test_html_ebay_description_and_fb_description_are_searched(self, ops, mock_client):
+        fb = {"id": 12, "name": "Optiplex", "description": "Weighs 2 lb 4 oz", "condition": "good",
+              "price": 129.0, "product_tmpl_id": [7, "Dell"]}
+        tmpl = dict(PKG_TMPL, ebay_description='<p style="font-weight:700">Dims: 20" x 14" x 8"</p>')
+        _stage_router(mock_client, tmpl, fb=fb, conditions={"3000": 2})
+        out = ops.stage_listing(7, fb_listing_id=12)
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["weight"] == 2.25
+        assert vals["ebay_pkg_length_in"] == 20.0
+        assert out["package"]["source"] == "description"
+
+    def test_caller_value_beats_description(self, ops, mock_client):
+        tmpl = dict(PKG_TMPL, description_sale="Weight: 12 lb")
+        _stage_router(mock_client, tmpl)
+        out = ops.stage_listing(7, weight_lb=5)
+        assert _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]["weight"] == 5.0
+        assert out["package"]["weight_source"] == "field"
+        assert out["package"]["dims_source"] == "missing"
+
+    def test_missing_is_a_note_not_a_block(self, ops, mock_client):
+        _stage_router(mock_client, PKG_TMPL)
+        out = ops.stage_listing(7)
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert "weight" not in vals
+        assert out["package"]["source"] == "missing"
+        assert out["package"]["weight_lb"] is None
+        assert any("Package weight/dims missing" in n and "--dims LxWxH" in n
+                   for n in out["notes"])
+        assert out["readiness"]["can_push"] is True   # readiness stays Odoo's
+
+    @pytest.mark.parametrize("kw", [{"weight_lb": 0}, {"weight_lb": "heavy"},
+                                    {"dims": "18x12"}, {"dims": "0x1x1"}])
+    def test_bad_values_are_refused_before_any_write(self, ops, mock_client, kw):
+        _stage_router(mock_client, PKG_TMPL)
+        with pytest.raises(ValueError):
+            ops.stage_listing(7, **kw)
+        assert not _calls(mock_client)
+
+    def test_fb_pickup_trailer_is_stripped_from_ebay_description(self, ops, mock_client):
+        fb = {"id": 12, "name": "Optiplex", "condition": "good", "price": 129.0,
+              "description": "Runs great.\n\nLocal pickup. Message with any questions.",
+              "product_tmpl_id": [7, "Dell"]}
+        _stage_router(mock_client, PKG_TMPL, fb=fb, conditions={"3000": 2})
+        out = ops.stage_listing(7, fb_listing_id=12)
+        desc = [w for w in _by(mock_client, TMPL, "write") if "ebay_description" in w[2][1]][0]
+        assert desc[2][1]["ebay_description"] == "<p>Runs great.</p>"
+        assert any("Local pickup" in n for n in out["notes"])
+
+    def test_caller_description_is_not_touched(self, ops, mock_client):
+        fb = {"id": 12, "name": "Optiplex", "condition": "good", "price": 129.0,
+              "description": "x. Local pickup.", "product_tmpl_id": [7, "Dell"]}
+        _stage_router(mock_client, PKG_TMPL, fb=fb, conditions={"3000": 2})
+        ops.stage_listing(7, fb_listing_id=12, description="Mine. Local pickup.")
+        desc = [w for w in _by(mock_client, TMPL, "write") if "ebay_description" in w[2][1]][0]
+        assert desc[2][1]["ebay_description"] == "<p>Mine. Local pickup.</p>"
+
+
+class TestStagePolicies:
+
+    def test_resolver_runs_after_category_copy_and_overrides_are_written_first(self, ops, mock_client):
+        _stage_router(mock_client, PKG_TMPL)
+        out = ops.stage_listing(7, shipping_mode="calculated", return_mode="none", warranty="1y")
+        calls = _calls(mock_client)
+        ov = [c for c in calls if c[1] == "write" and "ebay_shipping_mode" in c[2][1]][0]
+        assert ov[2][1] == {"ebay_shipping_mode": "calculated", "ebay_return_mode": "none",
+                            "ebay_warranty_kind": "months", "ebay_warranty_months": 12}
+        idx_ov = calls.index(ov)
+        idx_apply = next(i for i, c in enumerate(calls) if c[1] == "ebay_apply_resolved_policies")
+        idx_save = next(i for i, c in enumerate(calls) if c[1] == "ebay_wizard_save")
+        assert idx_ov < idx_apply < idx_save
+        assert calls[idx_apply][2] == [[7]]
+        assert out["staged"]["policies_resolved"] is True
+        assert out["staged"]["ebay_warranty_months"] == 12
+
+    @pytest.mark.parametrize("warranty,kind,months", [
+        ("none", "none", 0), ("factory", "factory", 0), ("30d", "months", 1),
+        ("2y", "months", 24), ("3Y", "months", 36), ("auto", "auto", 0)])
+    def test_warranty_mapping(self, ops, mock_client, warranty, kind, months):
+        _stage_router(mock_client, PKG_TMPL)
+        out = ops.stage_listing(7, warranty=warranty)
+        assert out["staged"]["ebay_warranty_kind"] == kind
+        assert out["staged"]["ebay_warranty_months"] == months
+
+    @pytest.mark.parametrize("kw", [{"shipping_mode": "cheap"}, {"return_mode": "maybe"},
+                                    {"warranty": "5y"}])
+    def test_bad_override_refused_before_any_write(self, ops, mock_client, kw):
+        _stage_router(mock_client, PKG_TMPL)
+        with pytest.raises(ValueError, match="must be one of"):
+            ops.stage_listing(7, **kw)
+        assert not _calls(mock_client)
+
+    def test_no_override_means_no_override_write(self, ops, mock_client):
+        _stage_router(mock_client, PKG_TMPL)
+        ops.stage_listing(7)
+        assert not [c for c in _calls(mock_client)
+                    if c[1] == "write" and "ebay_shipping_mode" in c[2][1]]
+        assert _by(mock_client, TMPL, "ebay_apply_resolved_policies")
+
+    def test_fallback_only_fills_what_the_resolver_left_blank(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+        base_read = router.routes[(TMPL, "read")]
+
+        def read(args, kw):
+            if set(kw.get("fields") or []) == set(POLICY_FIELDS):
+                # after the resolver: shipping + return set, payment still blank
+                return [dict(BLANK, id=7, ebay_seller_shipping_policy_id=[51, "USPS"],
+                             ebay_seller_return_policy_id=[6, "30d"])]
+            return base_read(args, kw)
+        router.routes[(TMPL, "read")] = read
+        out = ops.stage_listing(7, fallback={"payment_policy_id": 2, "return_policy_id": 8,
+                                             "shipping_policy_id": 122, "template_id": 52})
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["ebay_seller_payment_policy_id"] == 2
+        assert vals["ebay_template_id"] == 52
+        assert "ebay_seller_shipping_policy_id" not in vals
+        assert "ebay_seller_return_policy_id" not in vals
+        note = [n for n in out["notes"] if n.startswith("Fallback policies")][0]
+        assert "no default" in note
+
+    def test_missing_resolver_on_old_server_is_a_note(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+
+        def apply(args, kw):
+            raise OdooError("Odoo error on product.template.ebay_apply_resolved_policies: "
+                            "AttributeError: 'product.template' object has no attribute "
+                            "'ebay_apply_resolved_policies'")
+        router.routes[(TMPL, "ebay_apply_resolved_policies")] = apply
+        out = ops.stage_listing(7, fallback={"shipping_policy_id": 122})
+        assert any("resolver not available" in n for n in out["notes"])
+        assert out["staged"].get("policies_resolved") is None
+        assert _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]["ebay_seller_shipping_policy_id"] == 122
+
+    def test_resolver_failure_surfaces(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+
+        def apply(args, kw):
+            raise OdooError("Odoo error on product.template.ebay_apply_resolved_policies: "
+                            "UserError: no return policy configured")
+        router.routes[(TMPL, "ebay_apply_resolved_policies")] = apply
+        with pytest.raises(OdooError, match="no return policy"):
+            ops.stage_listing(7)
+
+    def test_policy_resolution_passes_through_from_wizard_state(self, ops, mock_client):
+        resolution = {"shipping_mode": "free", "shipping_policy_id": 51,
+                      "return_text": "30-Day Returns", "warranty_label": "30 Day Warranty",
+                      "warnings": ["fallback used"]}
+        state = dict(_state(), policy_resolution=resolution)
+        _stage_router(mock_client, PKG_TMPL, state=state)
+        out = ops.stage_listing(7)
+        assert out["policy_resolution"] == resolution
+
+    def test_policy_resolution_key_always_present(self, ops, mock_client):
+        _stage_router(mock_client, PKG_TMPL)
+        assert ops.stage_listing(7)["policy_resolution"] == {}
+
+    def test_live_listing_gets_no_override_write(self, ops, mock_client):
+        _stage_router(mock_client, dict(PKG_TMPL, ebay_listing_status="Active"))
+        out = ops.stage_listing(7, weight_lb=3, warranty="1y")
+        assert not _by(mock_client, TMPL, "write")
+        assert not _by(mock_client, TMPL, "ebay_apply_resolved_policies")
+        assert out["staged"] == {}
+
+
+class TestRevisePackage:
+
+    def test_weight_and_dims_become_vals(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {"success": True, "diff": [], "hash": "h"}})
+        ops.revise_stage(7, {"ebay_fixed_price": 99.0}, weight_lb="2.5", dims="18 x 12 x 6 in")
+        vals = _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][1]
+        assert vals == {"ebay_fixed_price": 99.0, "weight": 2.5, "ebay_pkg_length_in": 18.0,
+                        "ebay_pkg_width_in": 12.0, "ebay_pkg_height_in": 6.0}
+
+    def test_bad_weight_refused_before_rpc(self, ops, mock_client):
+        Router(mock_client, {})
+        with pytest.raises(ValueError, match="weight_lb"):
+            ops.revise_stage(7, weight_lb=-1)
+        assert not _calls(mock_client)
