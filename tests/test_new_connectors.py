@@ -229,6 +229,7 @@ class TestFbMarketplace:
         ]
         out = fb.mark_sold(7, qty=2)
         _, _, _, kw = _calls(mock_client)[0]
+        assert kw.pop("ref").startswith("auto-")   # always sent: retry-safe
         assert kw == {"qty": 2.0, "invoice": False}
         assert "stays live" in out["summary"]
 
@@ -266,10 +267,24 @@ class TestFbMarketplace:
         mock_client._models.execute_kw.side_effect = [
             [{"id": 1, "name": "A", "fb_temp": False}],
             [{"id": 2, "name": "B", "fb_temp": True}, {"id": 3, "name": "C", "fb_temp": False}],
+            1, 2, 1,                                  # search_count totals
         ]
         out = fb.channel_gaps()
         assert out["summary"].startswith("1 live on eBay but not on FB; 2 on FB")
         assert "(1 temp item(s))" in out["summary"]
+        assert out["truncated"] is False
+
+    def test_channel_gaps_reports_true_totals_when_page_is_capped(self, fb, mock_client):
+        """Counts come from search_count, not len(page) (Monday digest)."""
+        mock_client._models.execute_kw.side_effect = [
+            [{"id": 1, "name": "A", "fb_temp": False}],   # capped page
+            [],
+            60, 0, 0,
+        ]
+        out = fb.channel_gaps(limit=1)
+        assert out["summary"].startswith("60 live on eBay but not on FB")
+        assert "showing the first 1" in out["summary"]
+        assert out["truncated"] is True and out["ebay_live_not_on_fb_count"] == 60
 
     def test_resolve_product_bare_int_is_a_product_id(self, fb, mock_client):
         """Opposite of ebay.resolve_item, where a bare int is an FB listing."""
@@ -317,6 +332,7 @@ class TestFbMarketplace:
             [{"id": 42, "name": "Bose A20"}],         # create_listing name read
             11,                                       # create
             [draft],                                  # get after create
+            [],                                       # sibling open listings
             True,                                     # action_generate_ai_content
             [dict(draft, description="AI copy", ai_generated=True)],
         ]
@@ -358,6 +374,44 @@ class TestFbMarketplace:
         assert out["ebay_live"] is False and out["ebay_price_gap"] is None
         assert "No stock on hand." in out["notes"]
         assert "action_generate_ai_content" not in [c[1] for c in _calls(mock_client)]
+
+    def test_create_from_product_surfaces_access_errors_on_ebay_read(self, fb, mock_client):
+        from odoo_skill.errors import OdooAccessError
+        tmpl = {"id": 42, "name": "Drum", "list_price": 20.0, "qty_available": 0.0,
+                "type": "product", "description_sale": False, "fb_temp": False}
+        mock_client._models.execute_kw.side_effect = [
+            [tmpl], OdooAccessError("Access denied on product.template.read")]
+        with pytest.raises(OdooAccessError):
+            fb.create_from_product(42, generate=False)
+        assert "create" not in [c[1] for c in _calls(mock_client)]
+
+    def test_create_from_product_flags_duplicate_open_listing(self, fb, mock_client):
+        tmpl = {"id": 42, "name": "Drum", "list_price": 20.0, "qty_available": 1.0,
+                "type": "product", "description_sale": False, "fb_temp": False}
+        draft = {"id": 13, "name": "Drum", "state": "draft"}
+        mock_client._models.execute_kw.side_effect = [
+            [tmpl], [{"ebay_listed": False}], [],
+            [{"id": 42, "name": "Drum"}], 13, [draft],
+            [{"id": 12}],                              # a sibling appeared
+        ]
+        out = fb.create_from_product(42, generate=False)
+        assert out["created"] is True
+        assert any(n.startswith("DUPLICATE: ") and "#12" in n for n in out["notes"])
+
+    def test_resolve_product_limit_one_still_detects_ambiguity(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [], [{"id": 1, "name": "Drum A"}, {"id": 2, "name": "Drum B"}]]
+        out = fb.resolve_product("drum", limit=1)
+        assert out["kind"] == "ambiguous" and out["product_tmpl_id"] is None
+        assert len(out["candidates"]) == 1
+        assert _calls(mock_client)[1][3]["limit"] == 2
+
+    def test_price_gap_is_cent_exact(self):
+        from odoo_skill.models.fb_marketplace import _differs
+        assert _differs(150.0, 150.01) is True
+        assert _differs(100.0, 100.01) is True
+        assert _differs(19.99, 19.99) is False
+        assert _differs(0.1 + 0.2, 0.3) is False
 
 
 # ── Inbound shipments ────────────────────────────────────────────────

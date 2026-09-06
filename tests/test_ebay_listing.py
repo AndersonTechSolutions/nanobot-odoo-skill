@@ -380,6 +380,18 @@ class TestStageListing:
         assert vals["ebay_quantity"] == 1
         assert any("sync left OFF" in n for n in out["notes"])
 
+    def test_operator_quantity_string_is_normalised_once(self, ops, mock_client):
+        _stage_router(mock_client, BASE_TMPL)
+        ops.stage_listing(7, vals={"ebay_quantity": "3.0"})
+        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        assert vals["ebay_quantity"] == 3 and vals["ebay_sync_stock"] is True
+
+    def test_operator_quantity_garbage_is_refused_before_any_write(self, ops, mock_client):
+        _stage_router(mock_client, BASE_TMPL)
+        with pytest.raises(ValueError, match="whole number"):
+            ops.stage_listing(7, vals={"ebay_quantity": "three"})
+        assert not _by(mock_client, TMPL, "ebay_wizard_save")
+
     def test_operator_quantity_on_consumable_adds_no_sync_note(self, ops, mock_client):
         _stage_router(mock_client, dict(BASE_TMPL, type="consu"))
         out = ops.stage_listing(7, vals={"ebay_quantity": 5})

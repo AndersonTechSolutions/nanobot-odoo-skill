@@ -40,10 +40,13 @@ Four things shape this class:
 import html
 import logging
 import re
+import uuid
 from datetime import timedelta
 from typing import Any, Optional
 
-from ..errors import OdooError
+from ..errors import (
+    OdooAccessError, OdooAuthenticationError, OdooConnectionError, OdooError,
+)
 from ._base import BaseOps, utc_stamp
 
 logger = logging.getLogger("odoo_skill")
@@ -240,7 +243,7 @@ class FbMarketplaceOps(BaseOps):
         if not text:
             out["summary"] = "Empty reference."
             return out
-        m = re.fullmatch(r"(?:product\s*|#)?(\d+)", text, re.IGNORECASE)
+        m = re.fullmatch(r"(?:product[:\s]*|#)?(\d+)", text, re.IGNORECASE)
         if m:
             rows = self.client.search_read(
                 "product.template", [["id", "=", int(m.group(1))]],
@@ -262,8 +265,8 @@ class FbMarketplaceOps(BaseOps):
         rows = self.client.search_read(
             "product.template",
             ["|", ["name", "ilike", text], ["default_code", "ilike", text]],
-            fields=_GAP_FIELDS, limit=limit, order="name")
-        out["candidates"] = rows
+            fields=_GAP_FIELDS, limit=max(int(limit), 2), order="name")
+        out["candidates"] = rows[:max(int(limit), 1)]
         if len(rows) == 1:
             out.update(kind="name", product_tmpl_id=rows[0]["id"],
                        summary=f"Product #{rows[0]['id']} {rows[0]['name']}")
@@ -309,12 +312,24 @@ class FbMarketplaceOps(BaseOps):
         """Both gap lists plus counts — the Monday digest payload."""
         ebay_only = self.ebay_live_not_on_fb(limit=limit)
         fb_only = self.fb_not_on_ebay(limit=limit)
-        temp = sum(1 for r in fb_only if r.get("fb_temp"))
+        ebay_total = self.client.search_count(
+            "product.template", [["ebay_listed", "=", True], ["fb_listed", "=", False]])
+        fb_total = self.client.search_count(
+            "product.template", [["fb_listed", "=", True], ["ebay_listed", "=", False]])
+        temp = self.client.search_count(
+            "product.template",
+            [["fb_listed", "=", True], ["ebay_listed", "=", False], ["fb_temp", "=", True]])
+        truncated = ebay_total > len(ebay_only) or fb_total > len(fb_only)
         return {
             "summary": (
-                f"{len(ebay_only)} live on eBay but not on FB; "
-                f"{len(fb_only)} on FB but not on eBay ({temp} temp item(s))"
+                f"{ebay_total} live on eBay but not on FB; "
+                f"{fb_total} on FB but not on eBay ({temp} temp item(s))"
+                + (f"; showing the first {limit} of each" if truncated else "")
             ),
+            "ebay_live_not_on_fb_count": ebay_total,
+            "fb_not_on_ebay_count": fb_total,
+            "fb_temp_count": temp,
+            "truncated": truncated,
             "ebay_live_not_on_fb": ebay_only,
             "fb_not_on_ebay": fb_only,
         }
@@ -447,8 +462,15 @@ class FbMarketplaceOps(BaseOps):
             erows = self.client.read(
                 "product.template", [product_tmpl_id], fields=_EBAY_FIELDS)
             ebay = erows[0] if erows else {}
-        except OdooError:
-            ebay = {}  # sale_ebay not installed
+        except OdooError as exc:
+            # Only "no such field" means sale_ebay is absent; anything else
+            # (access, auth, connection, a real server fault) must surface.
+            if isinstance(exc, (OdooConnectionError, OdooAuthenticationError,
+                                OdooAccessError)) or not re.search(
+                    r"invalid field|field .* does not exist|unknown field",
+                    str(exc), re.IGNORECASE):
+                raise
+            ebay = {}
 
         existing = self.search(
             [["product_tmpl_id", "=", product_tmpl_id], ["state", "in", OPEN_STATES]],
@@ -476,6 +498,17 @@ class FbMarketplaceOps(BaseOps):
             **extra)
         listing = created["listing"]
         notes: list[str] = []
+        # The existence check and the create are separate RPCs; a retried
+        # create whose first response was lost, or a concurrent call, can
+        # leave two open listings. Say so rather than pretend it can't happen.
+        siblings = self.search(
+            [["product_tmpl_id", "=", product_tmpl_id], ["state", "in", OPEN_STATES],
+             ["id", "!=", listing["id"]]], limit=5, order="id")
+        if siblings:
+            ids = ", ".join(f"#{r['id']}" for r in siblings)
+            notes.append(
+                f"DUPLICATE: product already has open FB listing(s) {ids}; "
+                f"close the extra one before posting.")
         generated = False
         if generate:
             try:
@@ -607,8 +640,9 @@ class FbMarketplaceOps(BaseOps):
             kwargs["price"] = float(price)
         if close is not None:
             kwargs["close"] = bool(close)
-        if ref:
-            kwargs["ref"] = str(ref)
+        # Always send a ref: the transport retries lost responses, and only
+        # a stable ref makes the second attempt a no-op on the server.
+        kwargs["ref"] = str(ref) if ref else f"auto-{uuid.uuid4().hex[:16]}"
         result = self.run_action(listing_id, "fb_record_sale", **kwargs)
         sale = result["returned"] if isinstance(result["returned"], dict) else {}
         record = result["record"]
@@ -738,6 +772,8 @@ def _differs(a: Any, b: Any, tolerance: float = 0.01) -> bool:
     if a is None or b is None:
         return False
     try:
-        return abs(float(a) - float(b)) > tolerance
+        cents_a = round(float(a) * 100)
+        cents_b = round(float(b) * 100)
     except (TypeError, ValueError):
         return False
+    return abs(cents_a - cents_b) > round(tolerance * 100) - 1

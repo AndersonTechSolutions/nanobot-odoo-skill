@@ -563,13 +563,22 @@ class EbayListingOps(BaseOps):
         # on-hand quantity. An operator quantity that differs from stock
         # (a partial lot, a reserved unit) would be overwritten by the next
         # sync, so it turns sync off and says so.
-        if (vals or {}).get("ebay_quantity") is not None and defaults.get("ebay_sync_stock"):
-            on_hand = max(int(tmpl.get("virtual_available") or 0), 0)
-            if int(vals["ebay_quantity"]) != on_hand:
-                defaults["ebay_sync_stock"] = False
-                notes.append(
-                    f"Quantity {int(vals['ebay_quantity'])} differs from stock on hand "
-                    f"({on_hand}); eBay stock sync left OFF for this product.")
+        if (vals or {}).get("ebay_quantity") is not None:
+            try:
+                qty = int(float(vals["ebay_quantity"]))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"ebay_quantity must be a whole number, got {vals['ebay_quantity']!r}")
+            if qty < 0:
+                raise ValueError("ebay_quantity cannot be negative")
+            defaults["ebay_quantity"] = qty
+            if defaults.get("ebay_sync_stock"):
+                on_hand = max(int(tmpl.get("virtual_available") or 0), 0)
+                if qty != on_hand:
+                    defaults["ebay_sync_stock"] = False
+                    notes.append(
+                        f"Quantity {qty} differs from stock on hand "
+                        f"({on_hand}); eBay stock sync left OFF for this product.")
         if description is None and fb.get("description"):
             description = fb["description"]
         state = self.set_listing_fields(product_tmpl_id, defaults, description)
