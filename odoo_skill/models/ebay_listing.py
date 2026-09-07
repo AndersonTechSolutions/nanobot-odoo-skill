@@ -143,9 +143,14 @@ _WEIGHT_RE = re.compile(
     re.I,
 )
 _NUM = r"(\d+(?:\.\d+)?)"
-_UNIT = r'(in\b|inch(?:es)?\b|"|″|cm\b)?'
+#: A complete unit token per axis — ``in``/``inch``/``inches``/``"``/``″``,
+#: ``cm``, ``mm`` — matched case-insensitively and only as a whole word, so
+#: ``20 inside`` is not ``20 in`` and ``CM`` counts.
+_UNIT = r'(in\b|inch(?:es)?\b|"|″|cm\b|mm\b)?'
 _DIMS_RE = re.compile(
-    rf"{_NUM}\s*{_UNIT}\s*[x×X]\s*{_NUM}\s*{_UNIT}\s*[x×X]\s*{_NUM}\s*{_UNIT}")
+    rf"{_NUM}\s*{_UNIT}\s*[x×]\s*{_NUM}\s*{_UNIT}\s*[x×]\s*{_NUM}\s*{_UNIT}", re.I)
+#: Inches per unit token (lower-cased, first letter/glyph is enough).
+_UNIT_DIVISOR = {"i": 1.0, '"': 1.0, "″": 1.0, "c": 2.54, "m": 25.4}
 _DIMS_CUE_RE = re.compile(
     r"(dimension|dims?\b|size|box|package|measures|shipping|\bL\s*[x×]\s*W)", re.I)
 
@@ -214,13 +219,18 @@ def _parse_package_text(texts: list[str]) -> dict:
     Weight needs the word ``weight``/``weighs`` before the number (a bare
     ``36oz`` may be a bottle size; ``font-weight: 700`` has no unit).
     Dimensions need three numbers joined by ``x``/``×`` and either an
-    inch/cm unit or a nearby cue word (dimensions, size, box, package…) —
-    ``1920 x 1080 x 60`` in a spec table must not become a box. First hit
-    wins per value; returns ``{"weight_lb", "dims", "weight_text",
-    "dims_text"}`` with ``None`` for what was not found.
+    in/cm/mm unit or a nearby cue word (dimensions, size, box, package…) —
+    ``1920 x 1080 x 60`` in a spec table must not become a box. Units are
+    converted per axis (an axis without its own unit takes the nearest
+    later one, so ``40 x 30 x 20 cm`` is all cm); a trailing unit the
+    parser does not know (``m``, ``ft``, ``Hz``…) rejects the match with a
+    warning rather than guessing inches. First hit wins per value; returns
+    ``{"weight_lb", "dims", "weight_text", "dims_text", "warnings"}`` with
+    ``None`` for what was not found.
     """
     out: dict[str, Any] = {"weight_lb": None, "dims": None,
-                           "weight_text": None, "dims_text": None}
+                           "weight_text": None, "dims_text": None,
+                           "warnings": []}
     for raw in texts:
         if not raw or not isinstance(raw, str):
             continue
@@ -242,35 +252,55 @@ def _parse_package_text(texts: list[str]) -> dict:
                     out["weight_text"] = m.group(0).strip()
         if out["dims"] is None:
             for m in _DIMS_RE.finditer(text):
-                units = [u for u in (m.group(2), m.group(4), m.group(6)) if u]
+                units = [m.group(2), m.group(4), m.group(6)]
                 cue = _DIMS_CUE_RE.search(text[max(0, m.start() - 40):m.start()])
-                if not units and not cue:
+                if not any(units) and not cue:
                     continue
                 nums = [float(m.group(i)) for i in (1, 3, 5)]
                 if any(n <= 0 for n in nums):
                     continue
-                if any(u.lower() == "cm" for u in units):
-                    nums = [round(n / 2.54, 2) for n in nums]
-                out["dims"] = (nums[0], nums[1], nums[2])
+                tail = re.match(r"\s*([A-Za-z]+)", text[m.end():])
+                if tail and not units[2]:
+                    # ``400 x 300 x 200 mm`` is handled by the unit group;
+                    # what lands here is a unit we do not know (m, ft, Hz).
+                    out["warnings"].append(
+                        f"Ignored dimensions '{m.group(0).strip()} "
+                        f"{tail.group(1)}' — unit '{tail.group(1)}' is not "
+                        "in/cm/mm.")
+                    continue
+                # An axis without its own unit inherits the next explicit one.
+                filled, carry = [], None
+                for u in reversed(units):
+                    carry = u.lower() if u else carry
+                    filled.append(carry)
+                filled.reverse()
+                dims = tuple(round(n / _UNIT_DIVISOR[u[0]], 2) if u else n
+                             for n, u in zip(nums, filled))
+                out["dims"] = dims
                 out["dims_text"] = m.group(0).strip()
                 break
     return out
 
 
+def _pos(v: Any) -> Optional[float]:
+    """Positive float or ``None`` (False / 0 / text → None)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+#: Template field → report key for the package block.
+_PACKAGE_KEYS = {"weight": "weight_lb", "ebay_pkg_length_in": "length_in",
+                 "ebay_pkg_width_in": "width_in", "ebay_pkg_height_in": "height_in"}
+_DIM_KEYS = ("length_in", "width_in", "height_in")
+_DIM_FIELDS = ("ebay_pkg_length_in", "ebay_pkg_width_in", "ebay_pkg_height_in")
+
+
 def _package_values(rec: dict) -> dict:
     """Weight (lb) and dims (in) as floats or ``None`` from a template read."""
-    def num(v):
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            return None
-        return f if f > 0 else None
-    return {
-        "weight_lb": num(rec.get("weight")),
-        "length_in": num(rec.get("ebay_pkg_length_in")),
-        "width_in": num(rec.get("ebay_pkg_width_in")),
-        "height_in": num(rec.get("ebay_pkg_height_in")),
-    }
+    return {key: _pos(rec.get(field)) for field, key in _PACKAGE_KEYS.items()}
 
 
 def _m2o_id(value: Any) -> int | bool:
@@ -626,32 +656,36 @@ class EbayListingOps(BaseOps):
            items are created unsaleable — eBay orders need a saleable
            product).
         2. Category defaults into blank fields (:meth:`set_category_defaults`,
-           optionally re-categorising to *categ_id* first). Then the policy
-           overrides — *shipping_mode* (auto/free/calculated/freight),
+           optionally re-categorising to *categ_id* first).
+        3. Listing defaults: FixedPriceItem / GTC, ``ebay_fixed_price`` from
+           ``list_price``, title from name, best offer, stock sync (storable
+           products only) with ``ebay_quantity`` from on-hand stock. When
+           *fb_listing_id* is given: condition mapped from the FB listing
+           (:data:`FB_CONDITION_TO_EBAY`), description (minus its trailing
+           "Local pickup…" sentence) and title from it when not supplied.
+           Caller's *vals* / *description* last, so they win.
+        4. One wizard save with all of that plus *weight_lb* / *dims*
+           (``"LxWxH"`` inches or three numbers) — the condition reaches
+           Odoo BEFORE the policies are resolved.
+        5. Package: the server's package block (legacy attribute fallbacks
+           included) is the baseline; for what is still blank
+           :func:`_parse_package_text` looks through ``description_sale``,
+           ``ebay_description`` and the FB description and a second save
+           applies what it finds (noted). Nothing found is a warning, not a
+           block (readiness stays Odoo's): ``state["package"]`` keeps the
+           server's keys and adds ``weight_lb`` / ``length_in`` / ``width_in``
+           / ``height_in`` and ``source`` field / description / missing.
+        6. Policy overrides — *shipping_mode* (auto/free/calculated/freight),
            *return_mode* (auto/accept/none), *warranty* (auto/none/factory/
            30d/1y/2y/3y) — are written and ``ebay_apply_resolved_policies``
-           resolves shipping / return / warranty from condition + category
-           + those modes (odoo-ebay-custom 1.16; skipped with a note on an
-           older server). *fallback* — ``{"payment_policy_id",
+           resolves shipping / return / warranty from the saved condition +
+           category + those modes (odoo-ebay-custom 1.16; skipped with a
+           note on an older server). *fallback* — ``{"payment_policy_id",
            "return_policy_id", "shipping_policy_id", "template_id"}`` — fills
            only what is STILL blank afterwards, i.e. a category with no
            policy at all, and says so in ``notes``.
-        3. Listing defaults: FixedPriceItem / GTC, ``ebay_fixed_price`` from
-           ``list_price``, title from name, best offer, stock sync (storable
-           products only) with ``ebay_quantity`` from on-hand stock.
-        4. When *fb_listing_id* is given: condition mapped from the FB
-           listing (:data:`FB_CONDITION_TO_EBAY`), description (minus its
-           trailing "Local pickup…" sentence) and title from it when not
-           supplied, photos copied to the gallery.
-        5. Package: *weight_lb* / *dims* (``"LxWxH"`` inches or three
-           numbers) are written through the wizard save. When the product
-           still has no weight or dims, :func:`_parse_package_text` looks
-           through ``description_sale``, ``ebay_description`` and the FB
-           description and applies what it finds (noted). Nothing found is
-           a warning, not a block (readiness stays Odoo's):
-           ``state["package"]`` reports ``source`` field / description /
-           missing.
-        6. Caller's *vals* / *description* last, so they win.
+        7. Photos copied from the FB listing to the gallery; the state is
+           re-read when anything after the save changed it.
 
         Returns the wizard state plus ``readiness``, ``package``,
         ``policy_resolution`` (the server's resolver dict, passed through)
@@ -698,26 +732,11 @@ class EbayListingOps(BaseOps):
             self.client.write("product.product", variant_ids, {"ebay_use": True})
             staged["variant_ebay_use"] = len(variant_ids)
 
-        # 2. category defaults, resolver, then fallback for what is still blank
+        # 2. category defaults into blank fields; the ids are re-read after
+        #    the resolver runs (step 6) and the fallback fills what is left.
         policies = self.set_category_defaults(product_tmpl_id, categ_id)
         if categ_id:
             staged["categ_id"] = categ_id
-        if overrides:
-            self.client.write(self.MODEL, product_tmpl_id, overrides)
-            staged.update(overrides)
-        if self._apply_resolved_policies(product_tmpl_id, notes):
-            staged["policies_resolved"] = True
-            current = self.client.read(
-                self.MODEL, [product_tmpl_id], fields=list(_POLICY_FIELDS))
-            if current:
-                policies = {f: _m2o_id(current[0].get(f)) for f in _POLICY_FIELDS}
-        fill: dict[str, Any] = {}
-        for key, field in _FALLBACK_KEYS.items():
-            if not policies.get(field) and (fallback or {}).get(key):
-                fill[field] = int(fallback[key])
-        if fill:
-            notes.append("Fallback policies used for: " + ", ".join(sorted(fill))
-                         + " (the product category has no default for them).")
 
         # 3. listing defaults
         fb: dict = {}
@@ -766,7 +785,6 @@ class EbayListingOps(BaseOps):
                         defaults["ebay_condition_description"] = cond_desc
                 else:
                     notes.append(f"eBay condition code {code} not found on this database.")
-        defaults.update(fill)
         defaults.update(vals or {})
         # Q11/Q13: stock sync is only right when eBay's quantity IS the
         # on-hand quantity. An operator quantity that differs from stock
@@ -793,24 +811,64 @@ class EbayListingOps(BaseOps):
             if description != fb["description"]:
                 notes.append("Dropped the FB copy's 'Local pickup' sentence from the eBay description.")
 
-        # 5. package: caller's values, else what the descriptions say
-        package = self._stage_package(tmpl, fb, weight_lb, dims_in, defaults, notes)
-
+        # 4. save — condition, defaults, caller's vals and package values go
+        #    to Odoo BEFORE the policy resolver so it resolves from the final
+        #    condition (the wizard save re-applies the resolution itself on
+        #    a condition/category change; step 6 covers the overrides).
+        caller_pkg = self._caller_package(weight_lb, dims_in, vals)
+        defaults.update(caller_pkg)
         state = self.set_listing_fields(product_tmpl_id, defaults, description)
         staged.update(defaults)
         if description is not None:
             staged["ebay_description"] = True
 
-        # 4. photos
+        # 5. package: the server's canonical package (legacy attribute
+        #    fallbacks included) is the baseline; only what is still blank
+        #    comes from the descriptions.
+        package, pkg_fill = self._stage_package(
+            state.get("package"), tmpl, fb, caller_pkg, notes)
+        if pkg_fill:
+            state = self.set_listing_fields(product_tmpl_id, pkg_fill)
+            staged.update(pkg_fill)
+
+        # 6. policies: overrides → resolver → fallback for what is still blank
+        stale = False
+        if overrides:
+            self.client.write(self.MODEL, product_tmpl_id, overrides)
+            staged.update(overrides)
+            stale = True
+        if self._apply_resolved_policies(product_tmpl_id, notes):
+            staged["policies_resolved"] = True
+            stale = True
+            current = self.client.read(
+                self.MODEL, [product_tmpl_id], fields=list(_POLICY_FIELDS))
+            if current:
+                policies = {f: _m2o_id(current[0].get(f)) for f in _POLICY_FIELDS}
+        fill: dict[str, Any] = {}
+        for key, field in _FALLBACK_KEYS.items():
+            if not policies.get(field) and (fallback or {}).get(key):
+                fill[field] = int(fallback[key])
+        if fill:
+            notes.append("Fallback policies used for: " + ", ".join(sorted(fill))
+                         + " (the product category has no default for them).")
+            state = self.set_listing_fields(product_tmpl_id, fill)
+            staged.update(fill)
+            stale = False
+
+        # 7. photos
         if fb_listing_id and fb:
             copied = self.add_images_from_fb(product_tmpl_id, fb_listing_id)
             notes.append(copied["summary"])
             if copied["copied"]:
-                state = self.listing_state(product_tmpl_id)
+                stale = True
+        if stale:
+            state = self.listing_state(product_tmpl_id)
 
         state["staged"] = staged
         state["notes"] = notes
-        state["package"] = package
+        # Server package dict (weight_lb/length/width/height/package_type)
+        # stays the baseline; the ``*_in`` keys and sources sit on top.
+        state["package"] = {**(state.get("package") or {}), **package}
         # odoo-ebay-custom 1.16 adds the resolver dict to the wizard state;
         # an older server has no key — keep the shape stable for callers.
         state["policy_resolution"] = state.get("policy_resolution") or {}
@@ -870,47 +928,82 @@ class EbayListingOps(BaseOps):
             raise
         return True
 
-    def _stage_package(self, tmpl: dict, fb: dict, weight_lb: Optional[float],
-                       dims_in: Optional[tuple], defaults: dict,
-                       notes: list[str]) -> dict:
-        """Decide the package values to save and report where they came
-        from. Caller's values win; blank fields fall back to the text of
-        the product / eBay / FB descriptions; what is still missing is a
-        warning (D1), never a block — Kevin re-stages with the values or
-        asks."""
-        have = _package_values(tmpl)
-        weight_src = "field" if have["weight_lb"] else "missing"
-        dims_src = ("field" if all(have[k] for k in ("length_in", "width_in", "height_in"))
-                    else "missing")
+    @staticmethod
+    def _caller_package(weight_lb: Optional[float], dims_in: Optional[tuple],
+                        vals: Optional[dict]) -> dict:
+        """Package field values the caller asked for — *weight_lb* / *dims*
+        first, then any ``weight`` / ``ebay_pkg_*_in`` in *vals* on top (vals
+        are last, so they win). Non-positive vals entries are ignored."""
+        out: dict[str, Any] = {}
         if weight_lb:
-            defaults["weight"] = float(weight_lb)
-            have["weight_lb"] = float(weight_lb)
-            weight_src = "field"
+            out["weight"] = float(weight_lb)
         if dims_in:
-            defaults["ebay_pkg_length_in"], defaults["ebay_pkg_width_in"], \
-                defaults["ebay_pkg_height_in"] = dims_in
-            have.update(length_in=dims_in[0], width_in=dims_in[1], height_in=dims_in[2])
-            dims_src = "field"
+            out["ebay_pkg_length_in"], out["ebay_pkg_width_in"], \
+                out["ebay_pkg_height_in"] = dims_in
+        for field in _PACKAGE_FIELDS:
+            v = (vals or {}).get(field)
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                out[field] = f
+        return out
+
+    def _stage_package(self, server_pkg: Optional[dict], tmpl: dict, fb: dict,
+                       caller_pkg: dict, notes: list[str]) -> tuple[dict, dict]:
+        """Effective package after the save and what is still to fill.
+
+        Precedence: caller's values (already saved, overlaid again in case
+        the server did not echo them) > the server's package dict from the
+        wizard state (legacy attribute fallbacks included; a template read
+        when the server has no package block) > the product / eBay / FB
+        description text, which fills only the fields that are still blank.
+        What is still missing is a warning (D1), never a block — Kevin
+        re-stages with the values or asks.
+
+        Returns ``(package, fill)``: the report dict (``weight_lb``,
+        ``length_in``, ``width_in``, ``height_in``, ``source``,
+        ``weight_source``, ``dims_source``) and the field values to save.
+        """
+        if server_pkg:
+            have = {
+                "weight_lb": _pos(server_pkg.get("weight_lb")),
+                "length_in": _pos(server_pkg.get("length")),
+                "width_in": _pos(server_pkg.get("width")),
+                "height_in": _pos(server_pkg.get("height")),
+            }
+        else:
+            have = _package_values(tmpl)
+        for field, key in _PACKAGE_KEYS.items():
+            if caller_pkg.get(field):
+                have[key] = float(caller_pkg[field])
+        weight_src = "field" if have["weight_lb"] else "missing"
+        dims_src = ("field" if all(have[k] for k in _DIM_KEYS) else "missing")
+        fill: dict[str, Any] = {}
         if weight_src == "missing" or dims_src == "missing":
             found = _parse_package_text([
                 tmpl.get("description_sale") or "",
                 tmpl.get("ebay_description") or "",
                 (fb or {}).get("description") or "",
             ])
+            notes.extend(found["warnings"])
             if weight_src == "missing" and found["weight_lb"]:
-                defaults["weight"] = found["weight_lb"]
+                fill["weight"] = found["weight_lb"]
                 have["weight_lb"] = found["weight_lb"]
                 weight_src = "description"
                 notes.append(f"Package weight {found['weight_lb']:g} lb taken from the "
                              f"description ('{found['weight_text']}').")
             if dims_src == "missing" and found["dims"]:
-                length, width, height = found["dims"]
-                defaults.update(ebay_pkg_length_in=length, ebay_pkg_width_in=width,
-                                ebay_pkg_height_in=height)
-                have.update(length_in=length, width_in=width, height_in=height)
+                taken = []
+                for key, field, value in zip(_DIM_KEYS, _DIM_FIELDS, found["dims"]):
+                    if not have[key]:
+                        fill[field] = value
+                        have[key] = value
+                        taken.append(f"{key[:-3]} {value:g}")
                 dims_src = "description"
-                notes.append(f"Package dimensions {length:g}×{width:g}×{height:g} in taken "
-                             f"from the description ('{found['dims_text']}').")
+                notes.append("Package " + ", ".join(taken) + " in taken from the "
+                             f"description ('{found['dims_text']}').")
         missing = [name for name, src in (("weight", weight_src), ("dims", dims_src))
                    if src == "missing"]
         if missing:
@@ -922,8 +1015,9 @@ class EbayListingOps(BaseOps):
             source = "description"
         else:
             source = "field"
-        return {**have, "source": source, "weight_source": weight_src,
-                "dims_source": dims_src}
+        package = {**have, "source": source, "weight_source": weight_src,
+                   "dims_source": dims_src}
+        return package, fill
 
     # ── Publish / end ────────────────────────────────────────────────
 

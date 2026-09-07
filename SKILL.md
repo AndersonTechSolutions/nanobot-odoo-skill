@@ -370,17 +370,23 @@ any.
 fb_marketplace_lister 4.2).** `stage_listing` also takes `weight_lb`, `dims`
 (`"LxWxH"` inches), `shipping_mode` (auto/free/calculated/freight),
 `return_mode` (auto/accept/none) and `warranty` (auto/none/factory/30d/1y/2y/3y).
-Weight and dims go through the wizard save; when the product has none, the
-product / eBay / FB descriptions are parsed for "weight: 12 lb" and
-"18 x 12 x 6 in" (noted as taken from the description). Nothing found is a
-**warning, not a block**: `state["package"]` reports
-`source: field|description|missing` and a note says to re-stage with the values
-— never guess them. The override modes are written to the product and
-`ebay_apply_resolved_policies` then sets shipping / return policies and the
-Warranty item specific from condition + category + modes; `fallback` ids fill
-only what is still blank (a category with no policy). `state["policy_resolution"]`
-is the server's resolver dict. The FB copy's trailing "Local pickup. Message
-with any questions." is dropped before it becomes `ebay_description`.
+Weight and dims go through the wizard save (`vals` keys `weight` /
+`ebay_pkg_*_in` win over the flags); what the server then still reports blank
+in its package block is looked for in the product / eBay / FB descriptions —
+"weight: 12 lb", "18 x 12 x 6 in", "40 x 30 x 20 cm", "400 x 300 x 200 mm"
+(converted per axis; an unknown unit such as `m`/`ft` is a warning, never a
+value) — and only the missing fields are filled (noted). Nothing found is a
+**warning, not a block**: `state["package"]` is the server's dict
+(`weight_lb`, `length`, `width`, `height`, `package_type`) plus `length_in` /
+`width_in` / `height_in` and `source: field|description|missing`; a note says
+to re-stage with the values — never guess them. The save (condition included)
+happens first; then the override modes are written to the product and
+`ebay_apply_resolved_policies` sets shipping / return policies and the
+Warranty item specific from the saved condition + category + modes; `fallback`
+ids fill only what is still blank (a category with no policy).
+`state["policy_resolution"]` is the server's resolver dict. The FB copy's
+trailing "Local pickup. Message with any questions." is dropped before it
+becomes `ebay_description`.
 
 ```bash
 python3 odoo.py call ebay.stage_listing \

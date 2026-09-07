@@ -61,6 +61,32 @@ def _by(mock_client, model, method):
     return [c for c in _calls(mock_client) if c[0] == model and c[1] == method]
 
 
+def _saves(mock_client):
+    """vals of every ``ebay_wizard_save``, in order."""
+    return [c[2][1] for c in _by(mock_client, TMPL, "ebay_wizard_save")]
+
+
+def _saved(mock_client):
+    """All wizard saves merged (later saves win)."""
+    out = {}
+    for vals in _saves(mock_client):
+        out.update(vals)
+    return out
+
+
+def _idx(mock_client, method, **field):
+    """Index of the first call of *method* (optionally the first ``write``
+    / save whose vals hold *field*) in the call list."""
+    calls = _calls(mock_client)
+    for i, c in enumerate(calls):
+        if c[1] != method:
+            continue
+        if field and not all(c[2][1].get(k) == v for k, v in field.items()):
+            continue
+        return i
+    raise AssertionError(f"no call {method} {field}")
+
+
 TMPL = "product.template"
 READY = {"can_push": True, "blockers": [], "warnings": [], "already_listed": False}
 
@@ -349,11 +375,13 @@ class TestStageListing:
         out = ops.stage_listing(7, fallback={
             "payment_policy_id": 2, "return_policy_id": 6,
             "shipping_policy_id": 122, "template_id": 52})
-        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
-        assert vals["ebay_seller_payment_policy_id"] == 2
-        assert vals["ebay_seller_return_policy_id"] == 6
-        assert vals["ebay_seller_shipping_policy_id"] == 122
-        assert vals["ebay_template_id"] == 52
+        # the fallback is a second save AFTER the resolver ran
+        first, fill = _saves(mock_client)
+        assert "ebay_seller_payment_policy_id" not in first
+        assert fill == {"ebay_seller_payment_policy_id": 2, "ebay_seller_return_policy_id": 6,
+                        "ebay_seller_shipping_policy_id": 122, "ebay_template_id": 52}
+        assert _idx(mock_client, "ebay_apply_resolved_policies") \
+            < _idx(mock_client, "ebay_wizard_save", ebay_template_id=52)
         assert any("Fallback policies" in n for n in out["notes"])
 
     def test_caller_vals_win_over_defaults(self, ops, mock_client):
@@ -910,6 +938,25 @@ class TestParsePackageText:
     def test_cm_converts_to_inches(self):
         assert _parse_package_text(["size 40 x 30 x 20 cm"])["dims"] == (15.75, 11.81, 7.87)
 
+    def test_mm_and_uppercase_units_convert(self):
+        assert _parse_package_text(["Box: 400 x 300 x 200 mm"])["dims"] == (15.75, 11.81, 7.87)
+        assert _parse_package_text(["Size 40 X 30 X 20 CM"])["dims"] == (15.75, 11.81, 7.87)
+        assert _parse_package_text(["SIZE 18 IN X 12 IN X 6 IN"])["dims"] == (18.0, 12.0, 6.0)
+
+    def test_mixed_units_convert_per_axis(self):
+        assert _parse_package_text(['Dims 18 in x 30 cm x 6"'])["dims"] == (18.0, 11.81, 6.0)
+        assert _parse_package_text(["Dims 18 in x 300 mm x 6 cm"])["dims"] == (18.0, 11.81, 2.36)
+
+    def test_unsupported_unit_is_rejected_with_a_warning(self):
+        for text in ["Box 2 x 1 x 0.5 m", "Package 6 x 4 x 2 ft", "size 1920 x 1080 x 60Hz"]:
+            out = _parse_package_text([text])
+            assert out["dims"] is None, text
+            assert out["warnings"] and "not in/cm/mm" in out["warnings"][0], text
+
+    def test_word_starting_with_in_is_not_an_inch_unit(self):
+        # "inside" is not "in"; without a unit and without a cue there is no box
+        assert _parse_package_text(["measures 20 x 14 x 8 inside"])["dims"] is None
+
     def test_first_text_with_a_value_wins_per_value(self):
         out = _parse_package_text(["weight: 3 lb", "weight: 9 lb, dims 1 x 2 x 3 in"])
         assert out["weight_lb"] == 3.0 and out["dims"] == (1.0, 2.0, 3.0)
@@ -984,9 +1031,10 @@ class TestStagePackage:
         tmpl = dict(PKG_TMPL, description_sale="Weight: 12 lb. Box 18 x 12 x 6 in.")
         _stage_router(mock_client, tmpl)
         out = ops.stage_listing(7)
-        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
-        assert vals["weight"] == 12.0
-        assert vals["ebay_pkg_height_in"] == 6.0
+        first, fill = _saves(mock_client)
+        assert "weight" not in first          # main save first, fallback is a second save
+        assert fill == {"weight": 12.0, "ebay_pkg_length_in": 18.0,
+                        "ebay_pkg_width_in": 12.0, "ebay_pkg_height_in": 6.0}
         assert out["package"]["source"] == "description"
         assert any("taken from the description" in n for n in out["notes"])
 
@@ -996,16 +1044,70 @@ class TestStagePackage:
         tmpl = dict(PKG_TMPL, ebay_description='<p style="font-weight:700">Dims: 20" x 14" x 8"</p>')
         _stage_router(mock_client, tmpl, fb=fb, conditions={"3000": 2})
         out = ops.stage_listing(7, fb_listing_id=12)
-        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        vals = _saved(mock_client)
         assert vals["weight"] == 2.25
         assert vals["ebay_pkg_length_in"] == 20.0
         assert out["package"]["source"] == "description"
+
+    def test_vals_package_keys_beat_kwargs_and_description(self, ops, mock_client):
+        tmpl = dict(PKG_TMPL, description_sale="Weight: 12 lb. Box 18 x 12 x 6 in.")
+        _stage_router(mock_client, tmpl)
+        out = ops.stage_listing(7, weight_lb=5, dims="1x2x3",
+                                vals={"weight": 7.0, "ebay_pkg_height_in": 9.0})
+        assert len(_saves(mock_client)) == 1          # nothing left for the description
+        vals = _saves(mock_client)[0]
+        assert vals["weight"] == 7.0
+        assert (vals["ebay_pkg_length_in"], vals["ebay_pkg_width_in"],
+                vals["ebay_pkg_height_in"]) == (1.0, 2.0, 9.0)
+        assert out["package"]["weight_lb"] == 7.0 and out["package"]["height_in"] == 9.0
+        assert out["package"]["source"] == "field"
+        assert not any("description" in n for n in out["notes"])
+
+    def test_server_package_is_consulted_before_the_description(self, ops, mock_client):
+        # WP-A's wizard state carries the legacy-attribute fallback; the text
+        # must not override what the server already knows.
+        state = dict(_state(), package={"weight_lb": 4.5, "length": 10.0, "width": 8.0,
+                                        "height": 6.0, "package_type": "PackageThickEnvelope"})
+        tmpl = dict(PKG_TMPL, description_sale="Weight: 12 lb. Box 18 x 12 x 6 in.")
+        _stage_router(mock_client, tmpl, state=state)
+        out = ops.stage_listing(7)
+        assert len(_saves(mock_client)) == 1
+        assert "weight" not in _saves(mock_client)[0]
+        assert out["package"] == {
+            "weight_lb": 4.5, "length": 10.0, "width": 8.0, "height": 6.0,
+            "package_type": "PackageThickEnvelope",
+            "length_in": 10.0, "width_in": 8.0, "height_in": 6.0,
+            "source": "field", "weight_source": "field", "dims_source": "field"}
+        assert not any("description" in n or "missing" in n for n in out["notes"])
+
+    def test_partial_dims_fill_only_the_missing_axes(self, ops, mock_client):
+        state = dict(_state(), package={"weight_lb": 4.5, "length": 10.0, "width": None,
+                                        "height": None, "package_type": False})
+        tmpl = dict(PKG_TMPL, description_sale="Box 18 x 12 x 6 in.")
+        _stage_router(mock_client, tmpl, state=state)
+        out = ops.stage_listing(7)
+        first, fill = _saves(mock_client)
+        assert fill == {"ebay_pkg_width_in": 12.0, "ebay_pkg_height_in": 6.0}
+        assert out["package"]["length_in"] == 10.0
+        assert out["package"]["dims_source"] == "description"
+        assert out["package"]["package_type"] is False      # server key kept
+        assert any("width 12, height 6 in taken from the description" in n
+                   for n in out["notes"])
+
+    def test_unsupported_unit_in_description_is_a_warning_not_a_value(self, ops, mock_client):
+        tmpl = dict(PKG_TMPL, description_sale="Box 2 x 1 x 0.5 m")
+        _stage_router(mock_client, tmpl)
+        out = ops.stage_listing(7)
+        assert len(_saves(mock_client)) == 1 and "ebay_pkg_length_in" not in _saved(mock_client)
+        assert out["package"]["dims_source"] == "missing"
+        assert any("not in/cm/mm" in n for n in out["notes"])
 
     def test_caller_value_beats_description(self, ops, mock_client):
         tmpl = dict(PKG_TMPL, description_sale="Weight: 12 lb")
         _stage_router(mock_client, tmpl)
         out = ops.stage_listing(7, weight_lb=5)
-        assert _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]["weight"] == 5.0
+        assert _saved(mock_client)["weight"] == 5.0
+        assert len(_saves(mock_client)) == 1
         assert out["package"]["weight_source"] == "field"
         assert out["package"]["dims_source"] == "missing"
 
@@ -1059,10 +1161,36 @@ class TestStagePolicies:
         idx_ov = calls.index(ov)
         idx_apply = next(i for i, c in enumerate(calls) if c[1] == "ebay_apply_resolved_policies")
         idx_save = next(i for i, c in enumerate(calls) if c[1] == "ebay_wizard_save")
-        assert idx_ov < idx_apply < idx_save
+        idx_categ = next(i for i, c in enumerate(calls)
+                         if c[1] == "read" and "categ_id" in (c[3].get("fields") or []))
+        # category copy → save (condition etc.) → overrides → resolver → refresh
+        assert idx_categ < idx_save < idx_ov < idx_apply
         assert calls[idx_apply][2] == [[7]]
+        idx_state = next(i for i, c in enumerate(calls) if c[1] == "ebay_wizard_state")
+        assert idx_apply < idx_state
         assert out["staged"]["policies_resolved"] is True
         assert out["staged"]["ebay_warranty_months"] == 12
+
+    def test_fb_condition_is_saved_before_the_resolver_runs(self, ops, mock_client):
+        fb = {"id": 12, "name": "Optiplex", "condition": "good", "price": 129.0,
+              "description": "x", "product_tmpl_id": [7, "Dell"]}
+        _stage_router(mock_client, PKG_TMPL, fb=fb, conditions={"3000": 2})
+        ops.stage_listing(7, fb_listing_id=12)
+        assert _idx(mock_client, "ebay_wizard_save", ebay_item_condition_id=2) \
+            < _idx(mock_client, "ebay_apply_resolved_policies")
+
+    def test_explicit_condition_is_saved_before_the_resolver_runs(self, ops, mock_client):
+        _stage_router(mock_client, PKG_TMPL)
+        ops.stage_listing(7, vals={"ebay_item_condition_id": 5}, warranty="none")
+        assert _idx(mock_client, "ebay_wizard_save", ebay_item_condition_id=5) \
+            < _idx(mock_client, "write", ebay_warranty_kind="none") \
+            < _idx(mock_client, "ebay_apply_resolved_policies")
+
+    def test_state_is_refreshed_after_the_resolver(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+        router.routes[(TMPL, "ebay_wizard_save")] = lambda a, k: dict(_state(), fresh=False)
+        router.routes[(TMPL, "ebay_wizard_state")] = lambda a, k: dict(_state(), fresh=True)
+        assert ops.stage_listing(7)["fresh"] is True
 
     @pytest.mark.parametrize("warranty,kind,months", [
         ("none", "none", 0), ("factory", "factory", 0), ("30d", "months", 1),
@@ -1101,7 +1229,7 @@ class TestStagePolicies:
         router.routes[(TMPL, "read")] = read
         out = ops.stage_listing(7, fallback={"payment_policy_id": 2, "return_policy_id": 8,
                                              "shipping_policy_id": 122, "template_id": 52})
-        vals = _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]
+        vals = _saved(mock_client)
         assert vals["ebay_seller_payment_policy_id"] == 2
         assert vals["ebay_template_id"] == 52
         assert "ebay_seller_shipping_policy_id" not in vals
@@ -1120,7 +1248,7 @@ class TestStagePolicies:
         out = ops.stage_listing(7, fallback={"shipping_policy_id": 122})
         assert any("resolver not available" in n for n in out["notes"])
         assert out["staged"].get("policies_resolved") is None
-        assert _by(mock_client, TMPL, "ebay_wizard_save")[0][2][1]["ebay_seller_shipping_policy_id"] == 122
+        assert _saved(mock_client)["ebay_seller_shipping_policy_id"] == 122
 
     def test_resolver_failure_surfaces(self, ops, mock_client):
         router = _stage_router(mock_client, PKG_TMPL)
