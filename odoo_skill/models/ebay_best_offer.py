@@ -39,7 +39,13 @@ _LIST_FIELDS = [
     "buyer_user_id", "buyer_feedback_score", "offer_type", "offer_price",
     "quantity", "list_price_at_offer", "discount_pct", "status",
     "expiration_time", "received_at", "review_verdict", "review_median",
-    "review_n",
+    "review_n", "est_fee", "est_net", "est_margin", "breakeven_price",
+]
+
+# Fee / net snapshot the server stores with the review (sale_ebay >= 1.43).
+_ESTIMATE_FIELDS = [
+    "cost_at_offer", "fee_rate_id", "est_fee_pct", "est_ad_rate", "est_fee",
+    "est_ship_cost", "est_net", "est_margin", "breakeven_price",
 ]
 
 _DETAIL_FIELDS = _LIST_FIELDS + [
@@ -47,7 +53,7 @@ _DETAIL_FIELDS = _LIST_FIELDS + [
     "last_seen_at", "is_expired", "review_note", "review_at", "review_ratio",
     "response_action", "counter_price", "response_message", "responded_at",
     "responded_by", "buyer_notice", "buyer_notice_sent_at",
-]
+] + [f for f in _ESTIMATE_FIELDS if f not in _LIST_FIELDS]
 
 _PRODUCT_FIELDS = [
     "id", "name", "default_code", "list_price", "standard_price", "ebay_id",
@@ -64,16 +70,24 @@ def _ref_id(value: Any) -> Any:
     return value[0] if isinstance(value, (list, tuple)) and value else value or None
 
 
-def verdict_for(offer_price: float, sold_median: float) -> str:
-    """Same thresholds as ``ebay.best.offer.verdict_for`` on the server."""
+def verdict_for(offer_price: float, sold_median: float,
+                est_net: Optional[float] = None, cost: Optional[float] = None) -> str:
+    """Same rules as ``ebay.best.offer.verdict_for`` on the server: comps
+    ratio first, then an offer whose estimated net (after eBay fees and
+    shipping) does not cover the cost is ``low`` regardless."""
     if not sold_median or sold_median <= 0 or not offer_price:
         return "unknown"
     ratio = float(offer_price) / float(sold_median)
     if ratio >= REVIEW_HIGH_RATIO:
-        return "high"
-    if ratio >= REVIEW_FAIR_RATIO:
-        return "fair"
-    return "low"
+        verdict = "high"
+    elif ratio >= REVIEW_FAIR_RATIO:
+        verdict = "fair"
+    else:
+        verdict = "low"
+    if verdict != "low" and est_net is not None and cost and float(cost) > 0 \
+            and float(est_net) < float(cost):
+        verdict = "low"
+    return verdict
 
 
 class EbayBestOfferOps(BaseOps):
@@ -115,8 +129,11 @@ class EbayBestOfferOps(BaseOps):
         tmpl_id = _ref_id(rec.get("product_tmpl_id"))
         rec["product"] = (self.client.read("product.template", [tmpl_id], fields=_PRODUCT_FIELDS) or [{}])[0] \
             if tmpl_id else {}
-        rec["suggested_verdict"] = verdict_for(rec.get("offer_price") or 0.0,
-                                               (rec["product"] or {}).get("ebay_comp_median") or 0.0)
+        rec["suggested_verdict"] = verdict_for(
+            rec.get("offer_price") or 0.0,
+            (rec["product"] or {}).get("ebay_comp_median") or 0.0,
+            est_net=rec.get("est_net") if rec.get("fee_rate_id") else None,
+            cost=rec.get("cost_at_offer") or (rec["product"] or {}).get("standard_price"))
         rec["summary"] = self._summary(rec)
         return rec
 
@@ -227,7 +244,27 @@ class EbayBestOfferOps(BaseOps):
         out["summary"] = (f"{verb}. " + (out.get("summary") or f"Offer #{rid} answered; "
                           f"readback failed: {out.get('readback_error')}") +
                           (f" Buyer message: {notice}." if notice else ""))
+        warning = self._money_warning(rec, method, args)
+        if warning:
+            out["warning"] = warning
+            out["summary"] += " WARNING: " + warning
         return out
+
+    @staticmethod
+    def _money_warning(rec: dict, method: str, args: tuple) -> Optional[str]:
+        """Ian's literal command is honoured; this only flags a response that
+        the server's fee / net snapshot says loses money."""
+        if not rec.get("fee_rate_id"):
+            return None
+        cost = float(rec.get("cost_at_offer") or 0)
+        if method == "action_counter" and args:
+            be = float(rec.get("breakeven_price") or 0)
+            if be and float(args[0]) < be:
+                return (f"Counter {float(args[0]):.2f} is below the breakeven {be:.2f} "
+                        f"(net after eBay fees would not cover cost).")
+        elif method == "action_accept" and cost and float(rec.get("est_net") or 0) < cost:
+            return f"Accepted below cost: est. net {float(rec.get('est_net') or 0):.2f} vs cost {cost:.2f}."
+        return None
 
     def message_buyer(self, offer_id: int, body: str, subject: Optional[str] = None) -> dict:
         """Send the buyer an eBay member message about the listing."""
@@ -266,8 +303,19 @@ class EbayBestOfferOps(BaseOps):
                          f"(n={product.get('ebay_comp_count') or 0}, asks) → {rec.get('suggested_verdict')}")
         else:
             parts.append("no comps yet")
-        if product.get("standard_price"):
-            parts.append(f"cost {product['standard_price']:.2f}")
+        cost = rec.get("cost_at_offer") or product.get("standard_price")
+        if cost:
+            parts.append(f"cost {float(cost):.2f}")
+        if rec.get("fee_rate_id") or rec.get("fee_rate"):  # record read vs server review summary
+            fee = (f"est fees {rec.get('est_fee') or 0:.2f} ({rec.get('est_fee_pct') or 0:.2f}% FVF"
+                   + (f" + {rec['est_ad_rate']:.2f}% ad" if rec.get("est_ad_rate") else "") + ")")
+            if rec.get("est_ship_cost"):
+                fee += f" + ship {rec['est_ship_cost']:.2f}"
+            parts.append(fee)
+            parts.append(f"net {rec.get('est_net') or 0:.2f}"
+                         + (f" (margin {rec.get('est_margin') or 0:+.2f})" if cost else ""))
+            if rec.get("breakeven_price"):
+                parts.append(f"breakeven {rec['breakeven_price']:.2f}")
         if rec.get("message"):
             parts.append(f"buyer says: {rec['message'][:120]!r}")
         if rec.get("expiration_time"):

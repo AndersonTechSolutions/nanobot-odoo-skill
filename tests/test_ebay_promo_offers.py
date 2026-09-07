@@ -233,6 +233,25 @@ class TestBestOffers:
         assert verdict_for(105, 100) == "high"
         assert verdict_for(50, 0) == "unknown"
 
+    def test_verdict_net_below_cost_is_low(self):
+        assert verdict_for(85, 100, est_net=70, cost=60) == "fair"
+        assert verdict_for(85, 100, est_net=59, cost=60) == "low"
+        assert verdict_for(110, 100, est_net=59, cost=60) == "low"
+        assert verdict_for(85, 100, est_net=10, cost=0) == "fair"
+
+    def test_summary_shows_fees_and_net(self):
+        rec = {"id": 2, "best_offer_id": "77", "status": "pending", "offer_price": 120.0,
+               "quantity": 1, "item_title": "Bose A20", "list_price_at_offer": 199.99,
+               "discount_pct": 40.0, "buyer_user_id": "b", "buyer_feedback_score": 3,
+               "review_verdict": "low", "review_median": 130.0, "review_n": 5,
+               "cost_at_offer": 100.0, "fee_rate_id": [7, "Laptops"], "est_fee_pct": 7.35,
+               "est_ad_rate": 4.0, "est_fee": 14.02, "est_ship_cost": 12.0, "est_net": 93.98,
+               "est_margin": -6.02, "breakeven_price": 128.5}
+        text = EbayBestOfferOps._summary(rec)
+        assert "est fees 14.02 (7.35% FVF + 4.00% ad) + ship 12.00" in text
+        assert "net 93.98 (margin -6.02)" in text and "breakeven 128.50" in text
+        assert "cost 100.00" in text
+
     def test_open_offers_uses_server_summary(self, offers, mock_client):
         rows = [{"id": 3, "offer_price": 120.0, "list_price": 199.99, "title": "Dell", "review_verdict": False}]
         mock_client._models.execute_kw.side_effect = Router({("ebay.best.offer", "open_offers_summary"): rows})
@@ -299,6 +318,27 @@ class TestBestOffers:
         decline = [c for c in _calls(mock_client) if c[1] == "action_decline"][0]
         assert decline[3] == {"message": "Too low"}
         assert out["buyer_message_status"].startswith("FAILED")
+
+    def test_counter_below_breakeven_warns_but_sends(self, offers, mock_client):
+        rec = dict(OFFER, fee_rate_id=[1, "Laptops"], cost_at_offer=100.0, est_net=93.98,
+                   breakeven_price=128.5)
+        r = Router({("ebay.best.offer", "read"): lambda a, k: [dict(rec)],
+                    ("ebay.best.offer", "action_counter"): True,
+                    ("product.template", "read"): [PRODUCT]})
+        mock_client._models.execute_kw.side_effect = r
+        out = offers.counter_offer(3, 125)
+        assert "action_counter" in [c[1] for c in _calls(mock_client)]
+        assert "breakeven 128.50" in out["warning"] and "WARNING" in out["summary"]
+        assert "warning" not in offers.counter_offer(3, 130)
+
+    def test_accept_below_cost_warns(self, offers, mock_client):
+        rec = dict(OFFER, fee_rate_id=[1, "Laptops"], cost_at_offer=100.0, est_net=93.98)
+        r = Router({("ebay.best.offer", "read"): [rec],
+                    ("ebay.best.offer", "action_accept"): True,
+                    ("product.template", "read"): [PRODUCT]})
+        mock_client._models.execute_kw.side_effect = r
+        out = offers.accept_offer(3)
+        assert "below cost" in out["warning"]
 
     def test_counter_guards_and_payload(self, offers, mock_client):
         r = Router({("ebay.best.offer", "read"): [OFFER],
