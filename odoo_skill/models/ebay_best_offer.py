@@ -27,9 +27,12 @@ from typing import Any, Optional
 from datetime import timedelta
 
 from ._base import BaseOps, utc_stamp
-from ..errors import OdooError
+from ..errors import OdooError, OdooRecordNotFoundError
 
 logger = logging.getLogger("odoo_skill")
+
+# XML-RPC ints are 32-bit; Odoo ids never approach this, BestOfferIDs always exceed it.
+_MAX_ODOO_ID = 2 ** 31
 
 _LIST_FIELDS = [
     "id", "best_offer_id", "item_id", "item_title", "product_tmpl_id",
@@ -118,16 +121,28 @@ class EbayBestOfferOps(BaseOps):
         return rec
 
     def _resolve(self, offer_id: Any) -> dict:
-        """Accept an Odoo id or an eBay BestOfferID."""
+        """Accept an Odoo id or an eBay BestOfferID.
+
+        eBay BestOfferIDs are 12+ digits, far outside the XML-RPC int range
+        Odoo ids live in, so only small integers are tried as Odoo ids; any
+        other identifier goes straight to a ``best_offer_id`` search. Only a
+        *missing record* falls through to that search — permission or
+        connection errors are real failures and propagate."""
         self._require()
         try:
-            return self.get(int(offer_id))
-        except (OdooError, ValueError, TypeError):
-            rows = self.search([["best_offer_id", "=", str(offer_id)]], limit=1,
-                               fields=self._fields(detail=True))
-            if not rows:
-                raise OdooError(f"No eBay offer with id or BestOfferID {offer_id!r}")
-            return rows[0]
+            as_int = int(str(offer_id).strip())
+        except (ValueError, TypeError):
+            as_int = None
+        if as_int is not None and 0 < as_int < _MAX_ODOO_ID:
+            try:
+                return self.get(as_int)
+            except OdooRecordNotFoundError:
+                pass
+        rows = self.search([["best_offer_id", "=", str(offer_id).strip()]], limit=1,
+                           fields=self._fields(detail=True))
+        if not rows:
+            raise OdooError(f"No eBay offer with id or BestOfferID {offer_id!r}")
+        return rows[0]
 
     # ── Review ───────────────────────────────────────────────────────
 
@@ -144,8 +159,15 @@ class EbayBestOfferOps(BaseOps):
         kwargs = {k: v for k, v in (("note", note), ("verdict", verdict)) if v}
         out = self.client.execute(self.MODEL, "action_record_review", [rid],
                                   float(sold_median or 0.0), int(sold_n or 0), **kwargs)
+        comps = None
+        tmpl_id = _ref_id(rec.get("product_tmpl_id"))
+        if prices and tmpl_id:
+            from .ebay_listing import EbayListingOps
+            comps = EbayListingOps(self.client).set_sold_comps(
+                tmpl_id, prices, source="ebay_sold_browser_offer_review")
         result = self.offer(rid)
         result["review"] = out
+        result["comps"] = comps
         result["summary"] = self._summary(result)
         return result
 
@@ -193,10 +215,18 @@ class EbayBestOfferOps(BaseOps):
             except OdooError as exc:  # the response already went through; report, don't unwind
                 logger.warning("buyer message after %s on offer %s failed: %s", method, rid, exc)
                 notice = f"FAILED: {str(exc)[:200]}"
-        out = self.offer(rid)
+        verb = f"{method.replace('action_', '').upper()}ED"
+        try:
+            out = self.offer(rid)
+        except OdooError as exc:  # both mutations are done; never report them as failed
+            logger.warning("readback after %s on offer %s failed: %s", method, rid, exc)
+            out = {"id": rid, "best_offer_id": rec.get("best_offer_id"), "summary": "",
+                   "readback_error": str(exc)[:200]}
+        out["response"] = verb.lower()
         out["buyer_message_status"] = notice
-        out["summary"] = f"{method.replace('action_', '').upper()}ED. " + out["summary"] + \
-            (f" Buyer message: {notice}." if notice else "")
+        out["summary"] = (f"{verb}. " + (out.get("summary") or f"Offer #{rid} answered; "
+                          f"readback failed: {out.get('readback_error')}") +
+                          (f" Buyer message: {notice}." if notice else ""))
         return out
 
     def message_buyer(self, offer_id: int, body: str, subject: Optional[str] = None) -> dict:
@@ -211,7 +241,7 @@ class EbayBestOfferOps(BaseOps):
     def sync_offers(self) -> dict:
         """Pull open offers from eBay now instead of waiting for the cron."""
         self._require()
-        raw = self.client.execute(self.MODEL, "action_sync_now")
+        raw = self.client.execute(self.MODEL, "action_sync_now", [])
         params = (raw or {}).get("params") if isinstance(raw, dict) else {}
         return {"synced": True, "summary": (params or {}).get("message") or "Synced.",
                 "open": self.open_offers(limit=20)}

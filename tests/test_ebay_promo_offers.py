@@ -95,6 +95,23 @@ class TestPromotions:
         assert "action_push_to_ebay" not in [m for _, m in r.misses] + [c[1] for c in _calls(mock_client)]
         assert out["summary"].startswith("DRAFT") and "approve promo 5" in out["summary"]
 
+    def test_create_coupon_accepts_markdown_alias_through_public_method(self, promo, mock_client):
+        state = {}
+
+        def create(args, kw):
+            state["vals"] = args[0]
+            return 6
+
+        r = Router({("ebay.promotion", "create"): create,
+                    ("ebay.promotion", "read"): [dict(PROMO, id=6, promotion_type="CODED_COUPON")],
+                    ("product.template", "read"): [{"id": 7, "name": "A"}]})
+        mock_client._models.execute_kw.side_effect = r
+        promo.create_promotion("Coupon", "CODED_COUPON", product_ids=[7],
+                               coupon_code="SAVE10NOW", markdown_percent=10, days=7)
+        vals = state["vals"]
+        assert vals["order_benefit_kind"] == "percent" and vals["order_percent"] == 10.0
+        assert "markdown_percent" not in vals
+
     def test_create_volume_promotion_builds_tiers(self, promo, mock_client):
         state = {}
         r = Router({("ebay.promotion", "create"): lambda a, k: state.setdefault("vals", a[0]) and 6,
@@ -315,6 +332,75 @@ class TestBestOffers:
         mock_client._models.execute_kw.side_effect = r
         out = offers.sync_offers()
         assert out["summary"] == "1 new, 0 updated, 0 closed."
+
+    def test_large_best_offer_id_skips_odoo_id_lookup(self, offers, mock_client):
+        """12-digit BestOfferIDs overflow XML-RPC ints; they must go straight to search."""
+        r = Router({("ebay.best.offer", "read"): [OFFER],
+                    ("ebay.best.offer", "search_read"): [OFFER],
+                    ("product.template", "read"): [PRODUCT]})
+        mock_client._models.execute_kw.side_effect = r
+        out = offers.offer("123456789012")
+        assert out["id"] == 3
+        reads = [c for c in _calls(mock_client) if c[0] == "ebay.best.offer" and c[1] == "read"]
+        assert reads == [] or all(c[2][0] == [3] for c in reads)
+        assert any(c[1] == "search_read" and ["best_offer_id", "=", "123456789012"] in c[2][0]
+                   for c in _calls(mock_client))
+
+    def test_resolve_propagates_non_missing_errors(self, offers, mock_client):
+        from xmlrpc.client import Fault
+        def denied(args, kw):
+            raise Fault(1, "odoo.exceptions.AccessError: not allowed")
+        mock_client._models.execute_kw.side_effect = Router({("ebay.best.offer", "read"): denied})
+        with pytest.raises(OdooError, match="AccessError|not allowed"):
+            offers.offer(3)
+        assert "search_read" not in [c[1] for c in _calls(mock_client)]
+
+    def test_record_review_with_prices_updates_product_comps(self, offers, mock_client):
+        r = Router({("ebay.best.offer", "read"): [dict(OFFER, review_verdict="fair", review_median=135.0, review_n=5)],
+                    ("ebay.best.offer", "action_record_review"): {"review_verdict": "fair"},
+                    ("product.template", "read"): [PRODUCT],
+                    ("product.template", "write"): True})
+        mock_client._models.execute_kw.side_effect = r
+        out = offers.record_review(3, 135.0, 5, prices=[120, 130, 135, 140, 150])
+        write = [c for c in _calls(mock_client) if c[0] == "product.template" and c[1] == "write"][0]
+        assert write[2][0] == [OFFER["product_tmpl_id"][0]]
+        vals = write[2][1]
+        assert vals["ebay_comp_median"] == 135.0 and vals["ebay_comp_count"] == 5
+        assert "offer_review" in vals["ebay_comp_json"]
+        assert out["comps"]["written"] is True
+
+    def test_record_review_without_prices_leaves_product_alone(self, offers, mock_client):
+        r = Router({("ebay.best.offer", "read"): [OFFER],
+                    ("ebay.best.offer", "action_record_review"): {},
+                    ("product.template", "read"): [PRODUCT]})
+        mock_client._models.execute_kw.side_effect = r
+        offers.record_review(3, 135.0, 5)
+        assert ("product.template", "write") not in [(c[0], c[1]) for c in _calls(mock_client)]
+
+    def test_readback_failure_after_response_is_not_a_failure(self, offers, mock_client):
+        from xmlrpc.client import Fault
+        state = {"reads": 0}
+        def read(args, kw):
+            state["reads"] += 1
+            if state["reads"] > 1:
+                raise Fault(1, "database gone away")
+            return [OFFER]
+        r = Router({("ebay.best.offer", "read"): read,
+                    ("ebay.best.offer", "action_accept"): True,
+                    ("ebay.best.offer", "action_message_buyer"): True})
+        mock_client._models.execute_kw.side_effect = r
+        out = offers.accept_offer(3, buyer_message="Deal.")
+        assert out["response"] == "accepted"
+        assert out["buyer_message_status"] == "sent"
+        assert "readback failed" in out["summary"] and out["summary"].startswith("ACCEPTED")
+
+    def test_sync_offers_passes_empty_ids_for_record_method(self, offers, mock_client):
+        r = Router({("ebay.best.offer", "action_sync_now"): {"params": {"message": "ok"}},
+                    ("ebay.best.offer", "open_offers_summary"): []})
+        mock_client._models.execute_kw.side_effect = r
+        offers.sync_offers()
+        call = [c for c in _calls(mock_client) if c[1] == "action_sync_now"][0]
+        assert call[2] == [[]]
 
 
 class TestPromotionTypeVals:

@@ -273,8 +273,12 @@ class EbayPromotionOps(BaseOps):
                 raise OdooError("CODED_COUPON needs coupon_code (8-15 alphanumerics).")
             vals["coupon_code"] = code
             vals["coupon_type"] = kw.get("coupon_type") or "PUBLIC_SINGLE_SELLER_COUPON"
-            pct = kw.get("order_percent", kw.get("markdown_percent"))
-            amt = kw.get("order_amount", kw.get("markdown_amount"))
+            # create_promotion passes every kwarg (None when unset), so fall
+            # back to the markdown aliases on None, not only on a missing key.
+            pct = kw.get("order_percent")
+            pct = kw.get("markdown_percent") if pct is None else pct
+            amt = kw.get("order_amount")
+            amt = kw.get("markdown_amount") if amt is None else amt
             if amt is not None:
                 vals.update(order_benefit_kind="amount", order_amount=float(amt))
             elif pct is not None:
