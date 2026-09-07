@@ -155,7 +155,7 @@ exactly how those two shipped ungated. Adding any ops method now fails
 | `ebay` | `product.template` | `sale_ebay` | `resolve_item`, `stage_listing`, `readiness`, `publish`, `end_listing`, `set_sold_comps`, `get_pricing`, `apply_suggested_price`, `listing_summary` |
 | `product_drafts` | `quick.product.draft` | `quick_product`, `new_product_gui` | `attention_needed`, `stalled_drafts`, `ai_spend_summary` |
 | `itad` | `tasks` | `projects-custom` | `ops_summary`, `upcoming_pickups`, `sla_at_risk`, `schedule_pickup` |
-| `fb_marketplace` | `fb.marketplace.listing` | `fb_marketplace_lister` | `marketplace_summary`, `renewal_due`, `stale_listings`, `needs_content`, `mark_listed`, `mark_renewed` |
+| `fb_marketplace` | `fb.marketplace.listing` | `fb_marketplace_lister` | `marketplace_summary`, `renewal_due`, `stale_listings`, `needs_content`, `mark_listed`, `mark_renewed`, `scales`, `read_scale`, `set_package` |
 | `inbound` | `inbound.shipment` | `inbound_tracking` | `dashboard`, `action_queue`, `awaiting_confirmation`, `overdue`, `confirm_receipt`, `receive_line` |
 | `order_status` | `sale.order` | `atech_order_status` | `status_link`, `awaiting_signature`, `confirmation_not_sent`, `settings` |
 | `ebay_messages` | `ebay.message` | `odoo-ebay-messages` | `inbox_summary`, `aging`, `draft_reply`, `send_reply`, `unshipped_orders` |
@@ -365,6 +365,47 @@ writes it directly (plain text is escaped into `<p>` markup). Photos publish
 from the gallery (`product_image_ids`), not `image_1920` — `stage_listing`
 copies FB listing photos there once and skips when the gallery already has
 any.
+
+**Package and policies (sale_ebay 1.40 / odoo-ebay-custom 1.16 /
+fb_marketplace_lister 4.2).** `stage_listing` also takes `weight_lb`, `dims`
+(`"LxWxH"` inches), `shipping_mode` (auto/free/calculated/freight),
+`return_mode` (auto/accept/none) and `warranty` (auto/none/factory/30d/1y/2y/3y).
+Weight and dims go through the wizard save (`vals` keys `weight` /
+`ebay_pkg_*_in` win over the flags); what the server then still reports blank
+in its package block is looked for in the product / eBay / FB descriptions —
+"weight: 12 lb", "18 x 12 x 6 in", "40 x 30 x 20 cm", "400 x 300 x 200 mm"
+(converted per axis; an unknown unit such as `m`/`ft` is a warning, never a
+value) — and only the missing fields are filled (noted). Nothing found is a
+**warning, not a block**: `state["package"]` is the server's dict
+(`weight_lb`, `length`, `width`, `height`, `package_type`) plus `length_in` /
+`width_in` / `height_in` and `source: field|description|missing`; a note says
+to re-stage with the values — never guess them. The save (condition included)
+happens first; then the override modes are written to the product and
+`ebay_apply_resolved_policies` sets shipping / return policies and the
+Warranty item specific from the saved condition + category + modes; `fallback`
+ids fill only what is still blank (a category with no policy).
+`state["policy_resolution"]` is the server's resolver dict. The FB copy's
+trailing "Local pickup. Message with any questions." is dropped before it
+becomes `ebay_description`.
+
+```bash
+python3 odoo.py call ebay.stage_listing \
+  --args '{"product_tmpl_id": 4211, "fb_listing_id": 12, "weight_lb": 12.5,
+           "dims": "18x12x6", "shipping_mode": "calculated", "warranty": "1y"}' --confirm
+python3 odoo.py call ebay.revise_stage \
+  --args '{"product_tmpl_id": 4211, "weight_lb": 12.5, "dims": "18x12x6"}' --confirm
+# Ventor scales: list the online ones, weigh onto the product, or set by hand
+python3 odoo.py call fb_marketplace.scales
+python3 odoo.py call fb_marketplace.read_scale --args '{"listing_id": 12, "scales_id": 3}' --confirm
+python3 odoo.py call fb_marketplace.set_package \
+  --args '{"product_id": 4211, "weight": 12.5, "length": 18, "width": 12, "height": 6}' --confirm
+```
+
+`read_scale` is gated as a write (it stores the reading by default;
+`"write": false` only returns it); without `scales_id` the server tries the
+product's remembered scale, then the user's Ventor default, then the only
+online scale. `set_package` keeps any value not passed; `weight` is in the
+database weight unit (lb or kg per `product.weight_in_lbs`), dims in inches.
 
 `set_sold_comps` stores prices gathered outside Odoo (e.g. eBay *sold*
 results read in a browser — the Browse API only sees asking prices). It

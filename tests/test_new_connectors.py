@@ -266,6 +266,96 @@ class TestFbMarketplace:
     def test_sale_rpcs_are_allowlisted_actions(self, fb):
         assert {"fb_record_sale", "fb_invoice_sales"} <= fb.ALLOWED_ACTIONS
 
+    # ── package: scales / read_scale / set_package (4.2) ─────────────
+
+    def test_scales_is_a_model_level_call_with_no_ids(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = [
+            {"id": 3, "name": "Bench scale", "computer": "shop-pc"}]
+        out = fb.scales()
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args, kw) == ("product.template", "fb_scales", [], {})
+        assert out == [{"id": 3, "name": "Bench scale", "computer": "shop-pc"}]
+
+    def test_scales_non_list_reply_is_empty(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = False
+        assert fb.scales() == []
+
+    def test_read_scale_on_listing_passes_scale_as_keyword(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = {
+            "weight": 2.35, "uom": "lb", "scales": "Bench scale", "scales_id": 3,
+            "measured_on": "2026-09-06 14:00:00"}
+        out = fb.read_scale(listing_id=7, scales_id=3)
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "fb_read_scale", [[7]])
+        assert kw == {"scales_id": 3, "write": True}
+        assert out["written"] is True
+        assert out["reading"]["weight"] == 2.35
+        assert "2.35 lb" in out["summary"] and "written" in out["summary"]
+
+    def test_read_scale_on_product_without_scale_omits_none(self, fb, mock_client):
+        """scales_id=None must not reach the wire (XML-RPC cannot marshal
+        None); the server then picks the remembered / default scale."""
+        mock_client._models.execute_kw.return_value = {"weight": 1.0, "uom": "lb"}
+        out = fb.read_scale(product_id=42, write=False)
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == ("product.template", "fb_read_scale", [[42]])
+        assert kw == {"write": False}
+        assert out["written"] is False and "not written" in out["summary"]
+        assert out["target"] == {"model": "product.template", "id": 42}
+
+    def test_read_scale_needs_a_target(self, fb, mock_client):
+        with pytest.raises(ValueError, match="listing_id"):
+            fb.read_scale(scales_id=3)
+        assert not _calls(mock_client)
+
+    def test_read_scale_is_gated_as_a_write(self):
+        import odoo
+        assert odoo._op_writes("read_scale") is True
+        assert odoo._op_writes("scales") is False
+
+    def test_set_package_sends_the_given_values_as_keywords(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = {
+            "weight": 2.5, "uom": "lb", "length": 18.0, "width": 12.0, "height": 6.0,
+            "dim_uom": "in", "measured_on": False, "scales_id": False}
+        out = fb.set_package(listing_id=7, weight=2.5, length=18, width=12, height=6)
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "fb_set_package", [[7]])
+        assert kw == {"weight": 2.5, "length": 18.0, "width": 12.0, "height": 6.0}
+        assert out["package"]["weight"] == 2.5
+        assert "2.5 lb, 18×12×6 in" in out["summary"]
+
+    def test_set_package_partial_omits_the_rest(self, fb, mock_client):
+        """An omitted value is left unchanged server-side — never sent as 0
+        or None (XML-RPC cannot marshal None)."""
+        mock_client._models.execute_kw.return_value = {
+            "weight": 5.0, "uom": "lb", "length": 10.0, "width": 8.0, "height": 6.0, "dim_uom": "in"}
+        out = fb.set_package(product_id=42, weight=5.0)
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == ("product.template", "fb_set_package", [[42]])
+        assert kw == {"weight": 5.0}
+        assert out["package"]["length"] == 10.0   # the server reports what stands
+
+    def test_set_package_dims_only(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = True
+        out = fb.set_package(listing_id=7, length=1, width=2, height=3)
+        assert _calls(mock_client)[0][3] == {"length": 1.0, "width": 2.0, "height": 3.0}
+        assert out["package"] == {"length": 1.0, "width": 2.0, "height": 3.0}
+        assert "? lb, 1×2×3 in" in out["summary"]
+
+    @pytest.mark.parametrize("kw", [{}, {"weight": -1}, {"weight": "heavy"}])
+    def test_set_package_refuses_bad_input_before_rpc(self, fb, mock_client, kw):
+        with pytest.raises(ValueError):
+            fb.set_package(listing_id=7, **kw)
+        assert not _calls(mock_client)
+
+    def test_action_read_scale_is_allowlisted(self, fb):
+        assert "action_read_scale" in fb.ALLOWED_ACTIONS
+
+    def test_package_fields_are_declared(self, fb):
+        for f in ("weight", "ebay_pkg_length_in", "ebay_pkg_width_in",
+                  "ebay_pkg_height_in", "weight_measured_on"):
+            assert f in fb.LIST_FIELDS and f in fb.DETAIL_FIELDS
+
     def test_channel_gap_domains_use_the_stored_flags(self, fb, mock_client):
         mock_client._models.execute_kw.return_value = []
         fb.ebay_live_not_on_fb()
