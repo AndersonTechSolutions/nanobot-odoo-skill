@@ -46,6 +46,7 @@ from typing import Any, Optional
 
 from ..errors import (
     OdooAccessError, OdooAuthenticationError, OdooConnectionError, OdooError,
+    server_lacks_method,
 )
 from ._base import BaseOps, utc_stamp
 
@@ -801,8 +802,16 @@ class FbMarketplaceOps(BaseOps):
         ``box`` to :meth:`set_package` or ``ebay.stage_listing``.
         """
         self._require()
-        rows = self.client.execute(_PRODUCT_MODEL, "fb_package_types")
-        return [dict(r) for r in rows] if isinstance(rows, list) else []
+        try:
+            rows = self.client.execute(_PRODUCT_MODEL, "fb_package_types")
+        except OdooError as exc:
+            if server_lacks_method(exc, "fb_package_types"):
+                raise OdooError("Warehouse boxes need fb_marketplace_lister >= 4.4 "
+                                "on this server.") from exc
+            raise
+        if not isinstance(rows, list):
+            raise OdooError(f"fb_package_types returned {type(rows).__name__}, expected a list.")
+        return [dict(r) for r in rows]
 
     def _package_target(self, listing_id: Optional[int],
                         product_id: Optional[int]) -> tuple[str, int]:

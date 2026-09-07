@@ -34,7 +34,7 @@ import statistics
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ..errors import OdooError, OdooRecordNotFoundError
+from ..errors import OdooError, OdooRecordNotFoundError, server_lacks_method
 from ._base import BaseOps, OdooActionNotAllowedError
 from .fb_marketplace import _box_arg
 
@@ -909,7 +909,7 @@ class EbayListingOps(BaseOps):
         try:
             row = self.client.execute(self.MODEL, "fb_resolve_box", arg)
         except OdooError as exc:
-            if re.search(r"no attribute .?fb_resolve_box", str(exc)):
+            if server_lacks_method(exc, "fb_resolve_box"):
                 raise OdooError("Warehouse boxes need fb_marketplace_lister >= 4.4 "
                                 "on this server; pass dims instead.") from exc
             raise
@@ -977,9 +977,8 @@ class EbayListingOps(BaseOps):
         try:
             self.client.execute(self.MODEL, "ebay_apply_resolved_policies", [product_tmpl_id])
         except OdooError as exc:
-            # Python's exact wording for a missing method; anything else
-            # (a resolver that raised) is a real error and still surfaces.
-            if re.search(r"no attribute .?ebay_apply_resolved_policies", str(exc)):
+            # a missing method only; a resolver that raised still surfaces
+            if server_lacks_method(exc, "ebay_apply_resolved_policies"):
                 notes.append("Policy resolver not available on this server "
                              "(odoo-ebay-custom < 1.16); category defaults used as-is.")
                 return False

@@ -1373,9 +1373,15 @@ class TestStageBox:
         router = _stage_router(mock_client, PKG_TMPL)
 
         def missing(a, k):
-            raise OdooError("AttributeError: 'product.template' object has no attribute 'fb_resolve_box'")
+            raise OdooError("Odoo error on product.template.fb_resolve_box: AttributeError: "
+                            "The method 'fb_resolve_box' does not exist on the model 'product.template'")
         router.routes[(TMPL, "fb_resolve_box")] = missing
         with pytest.raises(OdooError, match="fb_marketplace_lister >= 4.4"):
+            ops.stage_listing(7, box=14)
+        # the method exists but raised → the server's own error surfaces
+        router.routes[(TMPL, "fb_resolve_box")] = lambda a, k: (_ for _ in ()).throw(
+            OdooError("Odoo error on product.template.fb_resolve_box: No box matches \"14\""))
+        with pytest.raises(OdooError, match="No box matches"):
             ops.stage_listing(7, box=14)
 
     @pytest.mark.parametrize("value", [1.5, [1], {"id": 1}])

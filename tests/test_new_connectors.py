@@ -360,9 +360,20 @@ class TestFbMarketplace:
         import odoo
         assert odoo._op_writes("boxes") is False
 
-    def test_boxes_non_list_reply_is_empty(self, fb, mock_client):
+    def test_boxes_non_list_reply_raises(self, fb, mock_client):
+        from odoo_skill.errors import OdooError
         mock_client._models.execute_kw.return_value = False
-        assert fb.boxes() == []
+        with pytest.raises(OdooError, match="expected a list"):
+            fb.boxes()
+
+    def test_boxes_on_old_server_is_a_plain_error(self, fb, mock_client):
+        from odoo_skill.errors import OdooError
+        # Odoo 17 call_kw wording (what prod actually says), not AttributeError
+        mock_client._models.execute_kw.side_effect = OdooError(
+            "Odoo error on product.template.fb_package_types: Traceback ...\n"
+            "AttributeError: The method 'fb_package_types' does not exist on the model 'product.template'\n")
+        with pytest.raises(OdooError, match="fb_marketplace_lister >= 4.4"):
+            fb.boxes()
 
     @pytest.mark.parametrize("given, sent", [
         ("11x8x4", "11x8x4"), ("  Custom 11 x 8 x 4 in ", "Custom 11 x 8 x 4 in"),
