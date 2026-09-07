@@ -8,9 +8,19 @@ plus a classifier that converts raw XML-RPC faults into the correct type.
 import xmlrpc.client
 import logging
 from typing import Union
+import re
 
 logger = logging.getLogger("odoo_skill")
 
+
+def server_lacks_method(exc: BaseException, method: str) -> bool:
+    """True when *exc* says the server has no RPC method *method* — Odoo
+    17's ``call_kw`` wording ("The method 'x' does not exist on the model")
+    or Python's ``AttributeError`` ("has no attribute 'x'"). Anything
+    else (the method exists and raised) is a real error."""
+    text = str(exc)
+    return bool(re.search(r"method '%s' does not exist" % re.escape(method), text)
+                or re.search(r"no attribute '%s'" % re.escape(method), text))
 
 class OdooError(Exception):
     """Base exception for all Odoo-related errors."""

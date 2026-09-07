@@ -46,6 +46,7 @@ from typing import Any, Optional
 
 from ..errors import (
     OdooAccessError, OdooAuthenticationError, OdooConnectionError, OdooError,
+    server_lacks_method,
 )
 from ._base import BaseOps, utc_stamp
 
@@ -58,6 +59,8 @@ logger = logging.getLogger("odoo_skill")
 _PACKAGE_FIELDS = [
     "weight", "ebay_pkg_length_in", "ebay_pkg_width_in", "ebay_pkg_height_in",
     "weight_measured_on",
+    # 4.3 warehouse box (stock.package.type) whose size fills the dims.
+    "ebay_package_type_id",
 ]
 
 _LIST_FIELDS = [
@@ -78,6 +81,25 @@ _DETAIL_FIELDS = _LIST_FIELDS + [
 #: ``product.template`` model the package RPCs live on; the listing's own
 #: ``fb_read_scale`` / ``fb_set_package`` delegate to it.
 _PRODUCT_MODEL = "product.template"
+
+#: ``box`` spellings that clear the warehouse box (sent as ``False``).
+_BOX_CLEAR = {"", "none", "clear", "false", "0"}
+
+
+def _box_arg(box: Any) -> Any:
+    """``box`` as the server wants it: an int id, a text (name / size), or
+    ``False`` to clear. ``None`` is the caller's "not given" and never gets
+    here. Non-text/non-int values are refused before any RPC."""
+    if box is False:
+        return False
+    if isinstance(box, bool) or isinstance(box, float) and not box.is_integer():
+        raise ValueError(f"box must be an id, a name or a size like '11x8x4', got {box!r}")
+    if isinstance(box, (int, float)):
+        return int(box) or False
+    if isinstance(box, str):
+        text = box.strip()
+        return False if text.lower() in _BOX_CLEAR else text
+    raise ValueError(f"box must be an id, a name or a size like '11x8x4', got {box!r}")
 
 #: ``product.template`` fields read by :meth:`FbMarketplaceOps.create_from_product`.
 _PRODUCT_FIELDS = [
@@ -771,6 +793,26 @@ class FbMarketplaceOps(BaseOps):
         rows = self.client.execute(_PRODUCT_MODEL, "fb_scales")
         return [dict(r) for r in rows] if isinstance(rows, list) else []
 
+    def boxes(self) -> list[dict]:
+        """Warehouse boxes that carry a size, smallest first
+        (``product.template.fb_package_types``, fb_marketplace_lister 4.4).
+
+        Each row is ``{"id", "name", "length", "width", "height"}`` in
+        inches. Pass a row's ``id`` (or its name / ``"LxWxH"`` size) as
+        ``box`` to :meth:`set_package` or ``ebay.stage_listing``.
+        """
+        self._require()
+        try:
+            rows = self.client.execute(_PRODUCT_MODEL, "fb_package_types")
+        except OdooError as exc:
+            if server_lacks_method(exc, "fb_package_types"):
+                raise OdooError("Warehouse boxes need fb_marketplace_lister >= 4.4 "
+                                "on this server.") from exc
+            raise
+        if not isinstance(rows, list):
+            raise OdooError(f"fb_package_types returned {type(rows).__name__}, expected a list.")
+        return [dict(r) for r in rows]
+
     def _package_target(self, listing_id: Optional[int],
                         product_id: Optional[int]) -> tuple[str, int]:
         """``(model, id)`` the package RPC runs on: the listing when given
@@ -822,19 +864,28 @@ class FbMarketplaceOps(BaseOps):
                     weight: Optional[float] = None,
                     length: Optional[float] = None,
                     width: Optional[float] = None,
-                    height: Optional[float] = None) -> dict:
-        """Write package weight and box dimensions (``fb_set_package``).
+                    height: Optional[float] = None,
+                    box: Any = None) -> dict:
+        """Write package weight, box dimensions and/or the warehouse box
+        (``fb_set_package``).
 
         *weight* is stored unchanged into ``product.weight``, so it is in
         the database's weight unit (lb or kg per the
-        ``product.weight_in_lbs`` setting); dimensions are inches.
+        ``product.weight_in_lbs`` setting); dimensions are inches. *box* is
+        a warehouse box by id, name or ``"LxWxH"`` size (see :meth:`boxes`;
+        fb_marketplace_lister 4.4): its size fills the dims unless explicit
+        dims come in the same call; ``""`` / ``"none"`` clears the box and
+        keeps the dims. An ambiguous or unknown box is the server's error,
+        naming the candidates.
 
         Only the values passed are sent, as keywords; the server leaves an
         omitted one unchanged, so a weight-only or dims-only update never
         zeroes the other half. Negative values are refused before any RPC.
         """
         model, rec_id = self._package_target(listing_id, product_id)
-        given: dict[str, float] = {}
+        given: dict[str, Any] = {}
+        if box is not None:
+            given["box"] = _box_arg(box)
         for key, val in (("weight", weight), ("length", length),
                          ("width", width), ("height", height)):
             if val is None:
@@ -846,16 +897,20 @@ class FbMarketplaceOps(BaseOps):
             if given[key] < 0:
                 raise ValueError(f"{key} cannot be negative")
         if not given:
-            raise ValueError("Pass at least one of weight, length, width, height.")
+            raise ValueError("Pass at least one of weight, length, width, height, box.")
         result = self.client.execute(model, "fb_set_package", [rec_id], **given)
         stored = dict(result) if isinstance(result, dict) else {}
         pkg = {k: stored.get(k, given.get(k)) for k in ("weight", "length", "width", "height")}
         fmt = lambda v: f"{float(v):g}" if v not in (None, False) else "?"  # noqa: E731
+        box_note = ""
+        if "box" in given:
+            box_note = (f", box #{stored['box_id']} {stored.get('box') or ''}".rstrip()
+                        if stored.get("box_id") else ", no box")
         return {
             "summary": (
                 f"Package on {model} #{rec_id}: {fmt(pkg['weight'])} "
                 f"{stored.get('uom') or 'lb'}, {fmt(pkg['length'])}×{fmt(pkg['width'])}"
-                f"×{fmt(pkg['height'])} {stored.get('dim_uom') or 'in'}."
+                f"×{fmt(pkg['height'])} {stored.get('dim_uom') or 'in'}{box_note}."
             ),
             "package": stored or given,
             "target": {"model": model, "id": rec_id},
