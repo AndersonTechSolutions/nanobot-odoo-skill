@@ -534,6 +534,7 @@ OPS_NAMESPACES = {
     "fb_marketplace": "fb_marketplace", "inbound": "inbound",
     "order_status": "order_status", "ebay_messages": "ebay_messages",
     "photography": "photography",
+    "ebay_promo": "ebay_promo", "ebay_offer": "ebay_offer",
     "pc_builds": "pc_builds",
 }
 
@@ -562,6 +563,10 @@ _WRITE_EXACT = frozenset({
     # fb_marketplace.read_scale reads a Ventor scale AND writes the weight
     # to the product (write=True by default) — a write despite its name.
     "read_scale",
+    # ebay_offer.sync_offers pulls open offers from eBay into Odoo;
+    # ebay_promo.refresh_promotion re-reads eBay status/reports into Odoo.
+    # Both write ebay.* rows despite reading like queries.
+    "sync_offers", "refresh_promotion",
 })
 
 #: Underscore-terminated prefixes for verb_object method names that mutate.
@@ -583,6 +588,11 @@ _WRITE_PREFIXES = (
     # ebay.stage_listing writes ebay_* fields, sale_ok and gallery photos;
     # it never publishes, but it is still a mutation.
     "stage_",
+    # ebay_promo.pause/resume_promotion change the promotion on eBay;
+    # ebay_offer.message_buyer sends an eBay member message; ebay_offer.accept/
+    # decline/counter_offer answer the buyer (already caught by verbs above
+    # except these).
+    "pause_", "resume_", "accept_", "decline_", "counter_", "message_",
 )
 
 

@@ -45,6 +45,8 @@ from .models.fb_marketplace import FbMarketplaceOps
 from .models.inbound import InboundOps
 from .models.order_status import OrderStatusOps
 from .models.ebay_messages import EbayMessageOps
+from .models.ebay_promotion import EbayPromotionOps
+from .models.ebay_best_offer import EbayBestOfferOps
 from .models.photography import PhotographyOps
 from .models.pc_build import PcBuildOps
 
@@ -244,6 +246,8 @@ class SmartActionHandler:
         self.inbound = InboundOps(client)
         self.order_status = OrderStatusOps(client)
         self.ebay_messages = EbayMessageOps(client)
+        self.ebay_promo = EbayPromotionOps(client)
+        self.ebay_offer = EbayBestOfferOps(client)
         self.photography = PhotographyOps(client)
         self.pc_builds = PcBuildOps(client)
 

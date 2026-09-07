@@ -1,0 +1,334 @@
+"""
+eBay buyer Best Offers for ``sale_ebay`` — ``ebay.best.offer``.
+
+Odoo mirrors every open offer (Trading GetBestOffers, 15-minute cron), so
+the agent never talks to eBay for the list. What it adds:
+
+* **Research on request.** :meth:`offer` returns the offer with the
+  product's stored comps; the skill's browser step gathers *sold* prices
+  and :meth:`record_review` stores the verdict on the offer
+  (``fair`` when offer >= 0.85 x sold median, ``high`` >= 1.05x).
+
+* **Responding is a separate, gated write.** :meth:`accept_offer`,
+  :meth:`decline_offer` and :meth:`counter_offer` each hit
+  RespondToBestOffer once. The operator's literal ``accept offer <id>`` /
+  ``counter offer <id> <price>`` / ``decline offer <id>`` is the only
+  trigger; nothing here decides on its own.
+
+* **The buyer gets told why.** eBay shows ``SellerResponse`` only inside the
+  offer card, which buyers miss. Passing ``buyer_message`` to a response
+  also sends an eBay member message (AddMemberMessageAAQToPartner) so the
+  reasoning lands in their inbox. :meth:`message_buyer` does it standalone.
+"""
+
+import logging
+from typing import Any, Optional
+
+from datetime import timedelta
+
+from ._base import BaseOps, utc_stamp
+from ..errors import OdooError, OdooRecordNotFoundError
+
+logger = logging.getLogger("odoo_skill")
+
+# XML-RPC ints are 32-bit; Odoo ids never approach this, BestOfferIDs always exceed it.
+_MAX_ODOO_ID = 2 ** 31
+
+_LIST_FIELDS = [
+    "id", "best_offer_id", "item_id", "item_title", "product_tmpl_id",
+    "buyer_user_id", "buyer_feedback_score", "offer_type", "offer_price",
+    "quantity", "list_price_at_offer", "discount_pct", "status",
+    "expiration_time", "received_at", "review_verdict", "review_median",
+    "review_n", "est_fee", "est_net", "est_margin", "breakeven_price",
+]
+
+# Fee / net snapshot the server stores with the review (sale_ebay >= 1.43).
+_ESTIMATE_FIELDS = [
+    "cost_at_offer", "fee_rate_id", "est_fee_pct", "est_ad_rate", "est_fee",
+    "est_ship_cost", "est_net", "est_margin", "breakeven_price",
+]
+
+_DETAIL_FIELDS = _LIST_FIELDS + [
+    "buyer_state", "buyer_country", "message", "ebay_status_raw",
+    "last_seen_at", "is_expired", "review_note", "review_at", "review_ratio",
+    "response_action", "counter_price", "response_message", "responded_at",
+    "responded_by", "buyer_notice", "buyer_notice_sent_at",
+] + [f for f in _ESTIMATE_FIELDS if f not in _LIST_FIELDS]
+
+_PRODUCT_FIELDS = [
+    "id", "name", "default_code", "list_price", "standard_price", "ebay_id",
+    "ebay_listing_status", "ebay_comp_low", "ebay_comp_p25", "ebay_comp_median",
+    "ebay_comp_high", "ebay_comp_count", "ebay_comp_fetched_at",
+    "ebay_suggested_price", "qty_available",
+]
+
+REVIEW_FAIR_RATIO = 0.85
+REVIEW_HIGH_RATIO = 1.05
+
+
+def _ref_id(value: Any) -> Any:
+    return value[0] if isinstance(value, (list, tuple)) and value else value or None
+
+
+def verdict_for(offer_price: float, sold_median: float,
+                est_net: Optional[float] = None, cost: Optional[float] = None) -> str:
+    """Same rules as ``ebay.best.offer.verdict_for`` on the server: comps
+    ratio first, then an offer whose estimated net (after eBay fees and
+    shipping) does not cover the cost is ``low`` regardless."""
+    if not sold_median or sold_median <= 0 or not offer_price:
+        return "unknown"
+    ratio = float(offer_price) / float(sold_median)
+    if ratio >= REVIEW_HIGH_RATIO:
+        verdict = "high"
+    elif ratio >= REVIEW_FAIR_RATIO:
+        verdict = "fair"
+    else:
+        verdict = "low"
+    if verdict != "low" and est_net is not None and cost and float(cost) > 0 \
+            and float(est_net) < float(cost):
+        verdict = "low"
+    return verdict
+
+
+class EbayBestOfferOps(BaseOps):
+    """Read, review and answer buyer Best Offers mirrored into Odoo."""
+
+    MODEL = "ebay.best.offer"
+    MODULE = "sale_ebay"
+    LIST_FIELDS = _LIST_FIELDS
+    DETAIL_FIELDS = _DETAIL_FIELDS
+    ORDER = "received_at desc, id desc"
+    REQUIRED_GROUPS = ("sale_ebay.group_ebay_offers", "sales_team.group_sale_manager")
+    ALLOWED_ACTIONS = frozenset({
+        "action_accept", "action_decline", "action_counter",
+        "action_record_review", "action_message_buyer", "action_sync_now",
+    })
+
+    # ── Read ─────────────────────────────────────────────────────────
+
+    def open_offers(self, limit: int = 20) -> list[dict]:
+        """Open offers newest first, with product comps and cost — the
+        server-side summary rows (``open_offers_summary``)."""
+        self._require()
+        return self.client.execute(self.MODEL, "open_offers_summary", limit=limit) or []
+
+    def offers_for_product(self, product_tmpl_id: int, include_closed: bool = False,
+                           limit: int = 20) -> list[dict]:
+        domain: list = [["product_tmpl_id", "=", int(product_tmpl_id)]]
+        if not include_closed:
+            domain.append(["status", "=", "pending"])
+        return self.search(domain, limit=limit)
+
+    def recent_offers(self, days: int = 7, limit: int = 50) -> list[dict]:
+        since = utc_stamp(-timedelta(days=int(days)))
+        return self.search([["received_at", ">=", since]], limit=limit)
+
+    def offer(self, offer_id: int) -> dict:
+        """One offer with the linked product's pricing context attached."""
+        rec = self._resolve(offer_id)
+        tmpl_id = _ref_id(rec.get("product_tmpl_id"))
+        rec["product"] = (self.client.read("product.template", [tmpl_id], fields=_PRODUCT_FIELDS) or [{}])[0] \
+            if tmpl_id else {}
+        rec["suggested_verdict"] = verdict_for(
+            rec.get("offer_price") or 0.0,
+            (rec["product"] or {}).get("ebay_comp_median") or 0.0,
+            est_net=rec.get("est_net") if rec.get("fee_rate_id") else None,
+            cost=rec.get("cost_at_offer") or (rec["product"] or {}).get("standard_price"))
+        rec["summary"] = self._summary(rec)
+        return rec
+
+    def _resolve(self, offer_id: Any) -> dict:
+        """Accept an Odoo id or an eBay BestOfferID.
+
+        eBay BestOfferIDs are 12+ digits, far outside the XML-RPC int range
+        Odoo ids live in, so only small integers are tried as Odoo ids; any
+        other identifier goes straight to a ``best_offer_id`` search. Only a
+        *missing record* falls through to that search — permission or
+        connection errors are real failures and propagate."""
+        self._require()
+        try:
+            as_int = int(str(offer_id).strip())
+        except (ValueError, TypeError):
+            as_int = None
+        if as_int is not None and 0 < as_int < _MAX_ODOO_ID:
+            try:
+                return self.get(as_int)
+            except OdooRecordNotFoundError:
+                pass
+        rows = self.search([["best_offer_id", "=", str(offer_id).strip()]], limit=1,
+                           fields=self._fields(detail=True))
+        if not rows:
+            raise OdooError(f"No eBay offer with id or BestOfferID {offer_id!r}")
+        return rows[0]
+
+    # ── Review ───────────────────────────────────────────────────────
+
+    def record_review(self, offer_id: int, sold_median: float, sold_n: int,
+                      note: Optional[str] = None, verdict: Optional[str] = None,
+                      prices: Optional[list[float]] = None) -> dict:
+        """Store a sold-comps review on the offer. When ``prices`` (the raw
+        sold prices) are given they are also written to the product's comp
+        aggregates via ``ebay.set_sold_comps`` semantics, so the product
+        keeps the research."""
+        rec = self._resolve(offer_id)
+        rid = rec["id"]
+        # XML-RPC cannot marshal None: only pass the optional kwargs that are set.
+        kwargs = {k: v for k, v in (("note", note), ("verdict", verdict)) if v}
+        out = self.client.execute(self.MODEL, "action_record_review", [rid],
+                                  float(sold_median or 0.0), int(sold_n or 0), **kwargs)
+        comps = None
+        tmpl_id = _ref_id(rec.get("product_tmpl_id"))
+        if prices and tmpl_id:
+            from .ebay_listing import EbayListingOps
+            comps = EbayListingOps(self.client).set_sold_comps(
+                tmpl_id, prices, source="ebay_sold_browser_offer_review")
+        result = self.offer(rid)
+        result["review"] = out
+        result["comps"] = comps
+        result["summary"] = self._summary(result)
+        return result
+
+    # ── Respond (gated) ──────────────────────────────────────────────
+
+    def accept_offer(self, offer_id: int, message: Optional[str] = None,
+                     buyer_message: Optional[str] = None) -> dict:
+        return self._respond(offer_id, "action_accept", message=message, buyer_message=buyer_message)
+
+    def decline_offer(self, offer_id: int, message: Optional[str] = None,
+                      buyer_message: Optional[str] = None) -> dict:
+        return self._respond(offer_id, "action_decline", message=message, buyer_message=buyer_message)
+
+    def counter_offer(self, offer_id: int, price: float, message: Optional[str] = None,
+                      buyer_message: Optional[str] = None, quantity: Optional[int] = None) -> dict:
+        """Counter at ``price`` (must be above the offer and below list)."""
+        rec = self._resolve(offer_id)
+        price = float(price)
+        if price <= float(rec.get("offer_price") or 0):
+            raise OdooError(f"Counter {price:.2f} must be above the buyer's "
+                            f"{rec.get('offer_price'):.2f}.")
+        lp = float(rec.get("list_price_at_offer") or 0)
+        if lp and price >= lp:
+            raise OdooError(f"Counter {price:.2f} must be below the list price {lp:.2f}.")
+        return self._respond(rec["id"], "action_counter", price, quantity=quantity,
+                             message=message, buyer_message=buyer_message)
+
+    def _respond(self, offer_id: Any, method: str, *args: Any, message: Optional[str] = None,
+                 buyer_message: Optional[str] = None, **kwargs: Any) -> dict:
+        rec = self._resolve(offer_id)
+        if rec.get("status") != "pending":
+            raise OdooError(f"Offer {rec['id']} is {rec.get('status')}; only open offers can be answered.")
+        if rec.get("is_expired"):
+            raise OdooError(f"Offer {rec['id']} expired at {rec.get('expiration_time')}.")
+        rid = rec["id"]
+        call_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        if message:
+            call_kwargs["message"] = message
+        self.client.execute(self.MODEL, method, [rid], *args, **call_kwargs)
+        notice = None
+        if buyer_message:
+            try:
+                self.client.execute(self.MODEL, "action_message_buyer", [rid], buyer_message)
+                notice = "sent"
+            except OdooError as exc:  # the response already went through; report, don't unwind
+                logger.warning("buyer message after %s on offer %s failed: %s", method, rid, exc)
+                notice = f"FAILED: {str(exc)[:200]}"
+        verb = f"{method.replace('action_', '').upper()}ED"
+        try:
+            out = self.offer(rid)
+        except OdooError as exc:  # both mutations are done; never report them as failed
+            logger.warning("readback after %s on offer %s failed: %s", method, rid, exc)
+            out = {"id": rid, "best_offer_id": rec.get("best_offer_id"), "summary": "",
+                   "readback_error": str(exc)[:200]}
+        out["response"] = verb.lower()
+        out["buyer_message_status"] = notice
+        out["summary"] = (f"{verb}. " + (out.get("summary") or f"Offer #{rid} answered; "
+                          f"readback failed: {out.get('readback_error')}") +
+                          (f" Buyer message: {notice}." if notice else ""))
+        warning = self._money_warning(rec, method, args)
+        if warning:
+            out["warning"] = warning
+            out["summary"] += " WARNING: " + warning
+        return out
+
+    @staticmethod
+    def _money_warning(rec: dict, method: str, args: tuple) -> Optional[str]:
+        """Ian's literal command is honoured; this only flags a response that
+        the server's fee / net snapshot says loses money."""
+        if not rec.get("fee_rate_id"):
+            return None
+        cost = float(rec.get("cost_at_offer") or 0)
+        if method == "action_counter" and args:
+            be = float(rec.get("breakeven_price") or 0)
+            if be and float(args[0]) < be:
+                return (f"Counter {float(args[0]):.2f} is below the breakeven {be:.2f} "
+                        f"(net after eBay fees would not cover cost).")
+        elif method == "action_accept" and cost and float(rec.get("est_net") or 0) < cost:
+            return f"Accepted below cost: est. net {float(rec.get('est_net') or 0):.2f} vs cost {cost:.2f}."
+        return None
+
+    def message_buyer(self, offer_id: int, body: str, subject: Optional[str] = None) -> dict:
+        """Send the buyer an eBay member message about the listing."""
+        rec = self._resolve(offer_id)
+        kwargs = {"subject": subject} if subject else {}
+        self.client.execute(self.MODEL, "action_message_buyer", [rec["id"]], body, **kwargs)
+        out = self.offer(rec["id"])
+        out["summary"] = "Buyer messaged. " + out["summary"]
+        return out
+
+    def sync_offers(self) -> dict:
+        """Pull open offers from eBay now instead of waiting for the cron."""
+        self._require()
+        raw = self.client.execute(self.MODEL, "action_sync_now", [])
+        params = (raw or {}).get("params") if isinstance(raw, dict) else {}
+        return {"synced": True, "summary": (params or {}).get("message") or "Synced.",
+                "open": self.open_offers(limit=20)}
+
+    # ── Summary ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _summary(rec: dict) -> str:
+        product = rec.get("product") or {}
+        parts = [
+            f"Offer #{rec.get('id')} ({rec.get('best_offer_id')}) {rec.get('status')}: "
+            f"{rec.get('offer_price') or 0:.2f} for {rec.get('quantity') or 1}x "
+            f"\"{(rec.get('item_title') or '')[:60]}\" list {rec.get('list_price_at_offer') or 0:.2f} "
+            f"({rec.get('discount_pct') or 0:.1f}% below)",
+            f"buyer {rec.get('buyer_user_id')} ({rec.get('buyer_feedback_score') or 0} fb)",
+        ]
+        if rec.get("review_verdict"):
+            parts.append(f"review {rec['review_verdict']} vs sold median "
+                         f"{rec.get('review_median') or 0:.2f} (n={rec.get('review_n') or 0})")
+        elif product.get("ebay_comp_median"):
+            parts.append(f"stored comps median {product['ebay_comp_median']:.2f} "
+                         f"(n={product.get('ebay_comp_count') or 0}, asks) → {rec.get('suggested_verdict')}")
+        else:
+            parts.append("no comps yet")
+        cost = rec.get("cost_at_offer") or product.get("standard_price")
+        if cost:
+            parts.append(f"cost {float(cost):.2f}")
+        if rec.get("fee_rate_id") or rec.get("fee_rate"):  # record read vs server review summary
+            fee = (f"est fees {rec.get('est_fee') or 0:.2f} ({rec.get('est_fee_pct') or 0:.2f}% FVF"
+                   + (f" + {rec['est_ad_rate']:.2f}% ad" if rec.get("est_ad_rate") else "") + ")")
+            if rec.get("est_ship_cost"):
+                fee += f" + ship {rec['est_ship_cost']:.2f}"
+            parts.append(fee)
+            parts.append(f"net {rec.get('est_net') or 0:.2f}"
+                         + (f" (margin {rec.get('est_margin') or 0:+.2f})" if cost else ""))
+            if rec.get("breakeven_price"):
+                parts.append(f"breakeven {rec['breakeven_price']:.2f}")
+        if rec.get("message"):
+            parts.append(f"buyer says: {rec['message'][:120]!r}")
+        if rec.get("expiration_time"):
+            parts.append(f"expires {rec['expiration_time']}")
+        return "; ".join(parts)
+
+    def offers_summary(self) -> dict:
+        rows = self.open_offers(limit=20)
+        unreviewed = [r for r in rows if not r.get("review_verdict")]
+        return {
+            "open": rows,
+            "summary": (f"{len(rows)} open offer(s), {len(unreviewed)} unreviewed."
+                        + ("".join(f"\n- #{r['id']} {r.get('offer_price'):.2f} vs list "
+                                   f"{r.get('list_price') or 0:.2f} on {(r.get('title') or '')[:50]} "
+                                   f"({r.get('review_verdict') or 'unreviewed'})" for r in rows[:10]))),
+        }
