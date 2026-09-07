@@ -313,35 +313,34 @@ class TestFbMarketplace:
         assert odoo._op_writes("read_scale") is True
         assert odoo._op_writes("scales") is False
 
-    def test_set_package_full_is_positional_in_server_order(self, fb, mock_client):
-        mock_client._models.execute_kw.return_value = True
+    def test_set_package_sends_the_given_values_as_keywords(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = {
+            "weight": 2.5, "uom": "lb", "length": 18.0, "width": 12.0, "height": 6.0,
+            "dim_uom": "in", "measured_on": False, "scales_id": False}
         out = fb.set_package(listing_id=7, weight=2.5, length=18, width=12, height=6)
         model, method, args, kw = _calls(mock_client)[0]
-        assert (model, method) == (fb.MODEL, "fb_set_package")
-        assert args == [[7], 2.5, 18.0, 12.0, 6.0]
-        assert kw == {}
-        assert out["package"] == {"weight": 2.5, "length": 18.0, "width": 12.0, "height": 6.0}
-        assert "18×12×6 in" in out["summary"]
+        assert (model, method, args) == (fb.MODEL, "fb_set_package", [[7]])
+        assert kw == {"weight": 2.5, "length": 18.0, "width": 12.0, "height": 6.0}
+        assert out["package"]["weight"] == 2.5
+        assert "2.5 lb, 18×12×6 in" in out["summary"]
 
-    def test_set_package_partial_preserves_the_rest(self, fb, mock_client):
-        mock_client._models.execute_kw.side_effect = [
-            [{"id": 42, "weight": 4.0, "ebay_pkg_length_in": 10.0,
-              "ebay_pkg_width_in": 8.0, "ebay_pkg_height_in": 6.0}],
-            True,
-        ]
-        fb.set_package(product_id=42, weight=5.0)
-        read, call = _calls(mock_client)
-        assert read[:2] == ("product.template", "read")
-        assert call[2] == [[42], 5.0, 10.0, 8.0, 6.0]
+    def test_set_package_partial_omits_the_rest(self, fb, mock_client):
+        """An omitted value is left unchanged server-side — never sent as 0
+        or None (XML-RPC cannot marshal None)."""
+        mock_client._models.execute_kw.return_value = {
+            "weight": 5.0, "uom": "lb", "length": 10.0, "width": 8.0, "height": 6.0, "dim_uom": "in"}
+        out = fb.set_package(product_id=42, weight=5.0)
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == ("product.template", "fb_set_package", [[42]])
+        assert kw == {"weight": 5.0}
+        assert out["package"]["length"] == 10.0   # the server reports what stands
 
-    def test_set_package_dims_only_keeps_weight(self, fb, mock_client):
-        mock_client._models.execute_kw.side_effect = [
-            [{"id": 7, "weight": 4.0, "ebay_pkg_length_in": 0.0,
-              "ebay_pkg_width_in": 0.0, "ebay_pkg_height_in": 0.0}],
-            True,
-        ]
-        fb.set_package(listing_id=7, length=1, width=2, height=3)
-        assert _calls(mock_client)[1][2] == [[7], 4.0, 1.0, 2.0, 3.0]
+    def test_set_package_dims_only(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = True
+        out = fb.set_package(listing_id=7, length=1, width=2, height=3)
+        assert _calls(mock_client)[0][3] == {"length": 1.0, "width": 2.0, "height": 3.0}
+        assert out["package"] == {"length": 1.0, "width": 2.0, "height": 3.0}
+        assert "? lb, 1×2×3 in" in out["summary"]
 
     @pytest.mark.parametrize("kw", [{}, {"weight": -1}, {"weight": "heavy"}])
     def test_set_package_refuses_bad_input_before_rpc(self, fb, mock_client, kw):

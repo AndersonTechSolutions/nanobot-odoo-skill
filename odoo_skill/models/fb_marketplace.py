@@ -823,13 +823,14 @@ class FbMarketplaceOps(BaseOps):
         """Write package weight (lb) and box dimensions (inches)
         (``fb_set_package``).
 
-        Any value left ``None`` keeps what the product already has, so a
-        weight-only or dims-only update never zeroes the other half.
-        Negative values are refused before any RPC.
+        Only the values passed are sent, as keywords; the server leaves an
+        omitted one unchanged, so a weight-only or dims-only update never
+        zeroes the other half. Negative values are refused before any RPC.
         """
         model, rec_id = self._package_target(listing_id, product_id)
-        given = {"weight": weight, "length": length, "width": width, "height": height}
-        for key, val in given.items():
+        given: dict[str, float] = {}
+        for key, val in (("weight", weight), ("length", length),
+                         ("width", width), ("height", height)):
             if val is None:
                 continue
             try:
@@ -838,25 +839,19 @@ class FbMarketplaceOps(BaseOps):
                 raise ValueError(f"{key} must be a number, got {val!r}")
             if given[key] < 0:
                 raise ValueError(f"{key} cannot be negative")
-        if all(v is None for v in given.values()):
+        if not given:
             raise ValueError("Pass at least one of weight, length, width, height.")
-        if any(v is None for v in given.values()):
-            fields = ["weight", "ebay_pkg_length_in", "ebay_pkg_width_in",
-                      "ebay_pkg_height_in"]
-            current = self.client.read(model, [rec_id], fields=fields)
-            cur = current[0] if current else {}
-            for key, field in zip(given, fields):
-                if given[key] is None:
-                    given[key] = float(cur.get(field) or 0.0)
-        self.client.execute(
-            model, "fb_set_package", [rec_id],
-            given["weight"], given["length"], given["width"], given["height"])
+        result = self.client.execute(model, "fb_set_package", [rec_id], **given)
+        stored = dict(result) if isinstance(result, dict) else {}
+        pkg = {k: stored.get(k, given.get(k)) for k in ("weight", "length", "width", "height")}
+        fmt = lambda v: f"{float(v):g}" if v not in (None, False) else "?"  # noqa: E731
         return {
             "summary": (
-                f"Package on {model} #{rec_id}: {given['weight']:g} lb, "
-                f"{given['length']:g}×{given['width']:g}×{given['height']:g} in."
+                f"Package on {model} #{rec_id}: {fmt(pkg['weight'])} "
+                f"{stored.get('uom') or 'lb'}, {fmt(pkg['length'])}×{fmt(pkg['width'])}"
+                f"×{fmt(pkg['height'])} {stored.get('dim_uom') or 'in'}."
             ),
-            "package": given,
+            "package": stored or given,
             "target": {"model": model, "id": rec_id},
         }
 
