@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 from ..errors import OdooError, OdooRecordNotFoundError
 from ._base import BaseOps, OdooActionNotAllowedError
+from .fb_marketplace import _box_arg
 
 logger = logging.getLogger("odoo_skill")
 
@@ -301,6 +302,13 @@ _DIM_FIELDS = ("ebay_pkg_length_in", "ebay_pkg_width_in", "ebay_pkg_height_in")
 def _package_values(rec: dict) -> dict:
     """Weight (lb) and dims (in) as floats or ``None`` from a template read."""
     return {key: _pos(rec.get(field)) for field, key in _PACKAGE_KEYS.items()}
+
+
+def _box_dims(row: dict) -> Optional[tuple[float, float, float]]:
+    """``(L, W, H)`` inches from a ``fb_resolve_box`` / ``boxes`` row, or
+    ``None`` for a sizeless box (tubes, custom)."""
+    dims = tuple(_pos(row.get(k)) for k in ("length", "width", "height"))
+    return dims if all(dims) else None  # type: ignore[return-value]
 
 
 def _m2o_id(value: Any) -> int | bool:
@@ -646,6 +654,7 @@ class EbayListingOps(BaseOps):
         shipping_mode: Optional[str] = None,
         return_mode: Optional[str] = None,
         warranty: Optional[str] = None,
+        box: Any = None,
     ) -> dict:
         """Prepare a product for eBay and report readiness. Does NOT publish.
 
@@ -666,7 +675,10 @@ class EbayListingOps(BaseOps):
            Caller's *vals* / *description* last, so they win.
         4. One wizard save with all of that plus *weight_lb* / *dims*
            (``"LxWxH"`` inches or three numbers) — the condition reaches
-           Odoo BEFORE the policies are resolved.
+           Odoo BEFORE the policies are resolved. *box* — a warehouse box
+           by id, name or size (``fb_marketplace.boxes``) — supplies the
+           dims when *dims* is not given and is written to the product
+           (``ebay_package_type_id``) after the save; ``""`` clears it.
         5. Package: the server's package block (legacy attribute fallbacks
            included) is the baseline; for what is still blank
            :func:`_parse_package_text` looks through ``description_sale``,
@@ -702,6 +714,9 @@ class EbayListingOps(BaseOps):
                 raise ValueError(f"weight_lb must be a number, got {weight_lb!r}")
             if weight_lb <= 0:
                 raise ValueError("weight_lb must be greater than zero")
+        box_row = self._resolve_box(box) if box is not None else None
+        if box_row and not dims_in:
+            dims_in = _box_dims(box_row)
         tmpl = self.client.read(
             self.MODEL, [product_tmpl_id], fields=self._fields(detail=True))
         if not tmpl:
@@ -821,6 +836,9 @@ class EbayListingOps(BaseOps):
         staged.update(defaults)
         if description is not None:
             staged["ebay_description"] = True
+        if box is not None:
+            staged["ebay_package_type_id"] = self._write_box(
+                product_tmpl_id, box_row, notes, caller_pkg)
 
         # 5. package: the server's canonical package (legacy attribute
         #    fallbacks included) is the baseline; only what is still blank
@@ -878,6 +896,45 @@ class EbayListingOps(BaseOps):
                else "blocked — " + "; ".join((state.get("readiness") or {}).get("blockers") or []))
         )
         return state
+
+    def _resolve_box(self, box: Any) -> Optional[dict]:
+        """Warehouse box → ``{"id", "name", "length", "width", "height"}``
+        (inches, 0 when the box has no size) through fb_marketplace_lister
+        4.4's read-only ``fb_resolve_box``; ``None`` when *box* clears.
+        Unknown / ambiguous boxes are the server's error, naming the
+        candidates; an older server gets a plain "not available" error."""
+        arg = _box_arg(box)
+        if arg is False:
+            return None
+        try:
+            row = self.client.execute(self.MODEL, "fb_resolve_box", arg)
+        except OdooError as exc:
+            if re.search(r"no attribute .?fb_resolve_box", str(exc)):
+                raise OdooError("Warehouse boxes need fb_marketplace_lister >= 4.4 "
+                                "on this server; pass dims instead.") from exc
+            raise
+        if not isinstance(row, dict) or not row.get("id"):
+            raise OdooError(f"Server returned no box for {box!r}.")
+        return dict(row)
+
+    def _write_box(self, product_tmpl_id: int, box_row: Optional[dict],
+                   notes: list[str], saved: Optional[dict] = None) -> int | bool:
+        """Write ``ebay_package_type_id`` and note it. The dims already went
+        through the wizard save (revise diff); they are sent again in the
+        same write because sale_ebay autofills the box's size on a box-only
+        write, which would clobber an explicit ``dims`` / ``vals`` size."""
+        box_id = int(box_row["id"]) if box_row else False
+        write_vals: dict[str, Any] = {"ebay_package_type_id": box_id}
+        if box_id:
+            write_vals.update({f: saved[f] for f in _DIM_FIELDS if (saved or {}).get(f)})
+        self.client.write(self.MODEL, product_tmpl_id, write_vals)
+        if box_row:
+            dims = _box_dims(box_row)
+            size = f" ({dims[0]:g}×{dims[1]:g}×{dims[2]:g} in)" if dims else " (no size)"
+            notes.append(f"Box #{box_row['id']} {box_row.get('name')}{size}.")
+        else:
+            notes.append("Warehouse box cleared.")
+        return box_id
 
     @staticmethod
     def _policy_overrides(shipping_mode: Optional[str], return_mode: Optional[str],
@@ -1094,7 +1151,8 @@ class EbayListingOps(BaseOps):
     def revise_stage(self, product_tmpl_id: int, vals: Optional[dict] = None,
                      description: Optional[str] = None,
                      refresh_description: bool = False,
-                     weight_lb: Optional[float] = None, dims: Any = None) -> dict:
+                     weight_lb: Optional[float] = None, dims: Any = None,
+                     box: Any = None) -> dict:
         """Stage a change to a LIVE listing — writes Odoo, never eBay.
 
         ``vals`` keys: ``ebay_title``, ``ebay_item_condition_id``,
@@ -1102,7 +1160,11 @@ class EbayListingOps(BaseOps):
         ``ebay_quantity``, ``ebay_best_offer*``, ``ebay_template_id``,
         ``weight`` and ``ebay_pkg_*_in`` (category / type / policies are
         not revisable: end + relist). ``weight_lb`` / ``dims`` (``"LxWxH"``
-        inches) are shorthand for those package keys (sale_ebay 1.40).
+        inches) are shorthand for those package keys (sale_ebay 1.40);
+        ``box`` (warehouse box id / name / size, ``fb_marketplace.boxes``)
+        supplies the dims when ``dims`` is not given — through the wizard
+        save, so the diff shows the size change — and the box itself is
+        written to the product afterwards (``""`` clears it).
         ``description`` (text or HTML) goes to ``ebay_description``. Returns
         the server's cumulative diff since the first stage, per-field
         pushability warnings, ``can_revise`` and the ``hash`` that
@@ -1128,9 +1190,12 @@ class EbayListingOps(BaseOps):
                 raise ValueError(f"weight_lb must be a number, got {weight_lb!r}")
             if clean["weight"] <= 0:
                 raise ValueError("weight_lb must be greater than zero")
-        if dims_in:
-            clean["ebay_pkg_length_in"], clean["ebay_pkg_width_in"], \
-                clean["ebay_pkg_height_in"] = dims_in
+        box_row = self._resolve_box(box) if box is not None else None
+        if box_row and not dims_in:
+            dims_in = _box_dims(box_row)
+        if dims_in:  # explicit vals win over dims / the box's size
+            for field, value in zip(_DIM_FIELDS, dims_in):
+                clean.setdefault(field, value)
         body = None
         if description is not None:
             body = description if "<" in description and ">" in description \
@@ -1140,6 +1205,10 @@ class EbayListingOps(BaseOps):
             args.append(True)  # sale_ebay >= 1.39.0 only; older servers reject the arg
         result = self._revise_result(self.client.execute(
             self.MODEL, "ebay_wizard_revise_stage", *args))
+        if result.get("success") and box is not None:
+            notes: list[str] = []
+            result["box_id"] = self._write_box(product_tmpl_id, box_row, notes, clean)
+            result.setdefault("warnings", []).extend(notes)
         if result.get("success"):
             result["summary"] = self._revise_summary(result)
         else:

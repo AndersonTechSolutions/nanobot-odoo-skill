@@ -348,6 +348,61 @@ class TestFbMarketplace:
             fb.set_package(listing_id=7, **kw)
         assert not _calls(mock_client)
 
+    # ── package: boxes / set_package(box=) (4.4) ─────────────────────
+
+    def test_boxes_is_a_model_level_read(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = [
+            {"id": 14, "name": "Custom 11 x 8 x 4 in", "length": 10.98, "width": 7.99, "height": 4.02}]
+        out = fb.boxes()
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args, kw) == ("product.template", "fb_package_types", [], {})
+        assert out[0]["id"] == 14
+        import odoo
+        assert odoo._op_writes("boxes") is False
+
+    def test_boxes_non_list_reply_is_empty(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = False
+        assert fb.boxes() == []
+
+    @pytest.mark.parametrize("given, sent", [
+        ("11x8x4", "11x8x4"), ("  Custom 11 x 8 x 4 in ", "Custom 11 x 8 x 4 in"),
+        (14, 14), ("14", "14"), (14.0, 14),
+        ("", False), ("none", False), (" Clear ", False), (False, False), (0, False),
+    ])
+    def test_set_package_box_is_sent_as_id_text_or_false(self, fb, mock_client, given, sent):
+        mock_client._models.execute_kw.return_value = {
+            "weight": 2.5, "uom": "lb", "length": 10.98, "width": 7.99, "height": 4.02,
+            "dim_uom": "in", "box_id": 14 if sent else False,
+            "box": "Custom 11 x 8 x 4 in" if sent else False}
+        out = fb.set_package(listing_id=7, box=given)
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "fb_set_package", [[7]])
+        assert kw == {"box": sent}
+        if sent:
+            assert "box #14 Custom 11 x 8 x 4 in" in out["summary"]
+        else:
+            assert "no box" in out["summary"]
+        assert out["package"]["box_id"] == (14 if sent else False)
+
+    def test_set_package_box_with_explicit_dims_sends_both(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = {}
+        fb.set_package(product_id=42, box=14, height=9)
+        assert _calls(mock_client)[0][3] == {"box": 14, "height": 9.0}
+
+    def test_set_package_box_alone_is_enough(self, fb, mock_client):
+        mock_client._models.execute_kw.return_value = {}
+        fb.set_package(product_id=42, box="UPS Tube")
+        assert _calls(mock_client)[0][3] == {"box": "UPS Tube"}
+
+    @pytest.mark.parametrize("bad", [1.5, [14], {"id": 14}, True])
+    def test_set_package_bad_box_refused_before_rpc(self, fb, mock_client, bad):
+        with pytest.raises(ValueError, match="box must be"):
+            fb.set_package(listing_id=7, box=bad)
+        assert not _calls(mock_client)
+
+    def test_box_field_is_declared(self, fb):
+        assert "ebay_package_type_id" in fb.LIST_FIELDS and "ebay_package_type_id" in fb.DETAIL_FIELDS
+
     def test_action_read_scale_is_allowlisted(self, fb):
         assert "action_read_scale" in fb.ALLOWED_ACTIONS
 

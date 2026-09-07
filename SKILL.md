@@ -155,7 +155,7 @@ exactly how those two shipped ungated. Adding any ops method now fails
 | `ebay` | `product.template` | `sale_ebay` | `resolve_item`, `stage_listing`, `readiness`, `publish`, `end_listing`, `set_sold_comps`, `get_pricing`, `apply_suggested_price`, `listing_summary` |
 | `product_drafts` | `quick.product.draft` | `quick_product`, `new_product_gui` | `attention_needed`, `stalled_drafts`, `ai_spend_summary` |
 | `itad` | `tasks` | `projects-custom` | `ops_summary`, `upcoming_pickups`, `sla_at_risk`, `schedule_pickup` |
-| `fb_marketplace` | `fb.marketplace.listing` | `fb_marketplace_lister` | `marketplace_summary`, `renewal_due`, `stale_listings`, `needs_content`, `mark_listed`, `mark_renewed`, `scales`, `read_scale`, `set_package` |
+| `fb_marketplace` | `fb.marketplace.listing` | `fb_marketplace_lister` | `marketplace_summary`, `renewal_due`, `stale_listings`, `needs_content`, `mark_listed`, `mark_renewed`, `scales`, `read_scale`, `boxes`, `set_package` |
 | `inbound` | `inbound.shipment` | `inbound_tracking` | `dashboard`, `action_queue`, `awaiting_confirmation`, `overdue`, `confirm_receipt`, `receive_line` |
 | `order_status` | `sale.order` | `atech_order_status` | `status_link`, `awaiting_signature`, `confirmation_not_sent`, `settings` |
 | `ebay_messages` | `ebay.message` | `odoo-ebay-messages` | `inbox_summary`, `aging`, `draft_reply`, `send_reply`, `unshipped_orders` |
@@ -399,6 +399,10 @@ python3 odoo.py call fb_marketplace.scales
 python3 odoo.py call fb_marketplace.read_scale --args '{"listing_id": 12, "scales_id": 3}' --confirm
 python3 odoo.py call fb_marketplace.set_package \
   --args '{"product_id": 4211, "weight": 12.5, "length": 18, "width": 12, "height": 6}' --confirm
+# Warehouse boxes (Easy Ship / fulfillment kiosk box types): list, then pick one
+python3 odoo.py call fb_marketplace.boxes
+python3 odoo.py call fb_marketplace.set_package --args '{"listing_id": 12, "box": "11x8x4"}' --confirm
+python3 odoo.py call ebay.stage_listing --args '{"product_tmpl_id": 4211, "box": 14}' --confirm
 ```
 
 `read_scale` is gated as a write (it stores the reading by default;
@@ -406,6 +410,17 @@ python3 odoo.py call fb_marketplace.set_package \
 product's remembered scale, then the user's Ventor default, then the only
 online scale. `set_package` keeps any value not passed; `weight` is in the
 database weight unit (lb or kg per `product.weight_in_lbs`), dims in inches.
+
+**Boxes (fb_marketplace_lister 4.4).** `fb_marketplace.boxes` lists the
+warehouse boxes that carry a size, smallest first (`id`, `name`, `length`,
+`width`, `height` in inches; sizeless ones such as tubes are omitted).
+`box` on `set_package`, `stage_listing` and `revise_stage` takes an id, a
+name (case-insensitive, or a unique part of it) or a size like `"11x8x4"`
+(orientation-insensitive, ±0.05 in); the box's size fills the dims unless
+explicit `dims` / `length`… come in the same call, and the box is stored on
+the product (`ebay_package_type_id`, shown in both listing forms). `""` /
+`"none"` clears the box and keeps the dims. An unknown or ambiguous box is
+the server's error naming the candidates — relay it and ask, never guess.
 
 `set_sold_comps` stores prices gathered outside Odoo (e.g. eBay *sold*
 results read in a browser — the Browse API only sees asking prices). It
