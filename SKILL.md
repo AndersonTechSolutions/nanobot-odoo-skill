@@ -402,7 +402,10 @@ python3 odoo.py call fb_marketplace.set_package \
 ```
 
 `read_scale` is gated as a write (it stores the reading by default;
-`"write": false` only returns it). `set_package` keeps any value not passed.
+`"write": false` only returns it); without `scales_id` the server tries the
+product's remembered scale, then the user's Ventor default, then the only
+online scale. `set_package` keeps any value not passed; `weight` is in the
+database weight unit (lb or kg per `product.weight_in_lbs`), dims in inches.
 
 `set_sold_comps` stores prices gathered outside Odoo (e.g. eBay *sold*
 results read in a browser — the Browse API only sees asking prices). It

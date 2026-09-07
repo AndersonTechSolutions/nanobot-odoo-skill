@@ -912,10 +912,11 @@ class EbayListingOps(BaseOps):
     def _apply_resolved_policies(self, product_tmpl_id: int, notes: list[str]) -> bool:
         """``ebay_apply_resolved_policies`` (odoo-ebay-custom 1.16): writes
         shipping / return policy ids and the Warranty item specific from
-        condition, category and the ``ebay_*_mode`` overrides — unless the
-        product is ``ebay_policy_manual``. ``False`` (with a note) when the
-        server does not have the method; the blank-only category copy then
-        stands, as before."""
+        condition, category and the ``ebay_*_mode`` overrides. On an
+        ``ebay_policy_manual`` product only the policy ids are frozen; the
+        Warranty specific is still (re)applied. ``False`` (with a note)
+        when the server does not have the method; the blank-only category
+        copy then stands, as before."""
         try:
             self.client.execute(self.MODEL, "ebay_apply_resolved_policies", [product_tmpl_id])
         except OdooError as exc:

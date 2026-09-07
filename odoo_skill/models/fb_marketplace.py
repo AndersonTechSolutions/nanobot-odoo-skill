@@ -788,12 +788,15 @@ class FbMarketplaceOps(BaseOps):
         """Weigh the item on a Ventor scale and store the result
         (``fb_read_scale``).
 
-        *scales_id* is one of :meth:`scales`; omitted, the server uses the
-        product's remembered scale or the API user's default and fails
-        with a plain error when it has neither. Returns the reading
-        (``weight`` in the database's weight unit, ``uom``, ``scales``,
-        ``measured_on``); with *write* the product's ``weight`` and
-        ``weight_measured_on`` are updated in the same call.
+        *scales_id* is one of :meth:`scales`; omitted, the server falls
+        back in order to the scale remembered on the product (or wizard),
+        then the API user's Ventor default, then the only scale that is
+        online — and fails with a plain error when none of those applies.
+        Returns the reading (``weight`` in the database's weight unit —
+        lb or kg per the ``product.weight_in_lbs`` setting — ``uom``,
+        ``scales``, ``measured_on``); with *write* the product's
+        ``weight`` and ``weight_measured_on`` are updated in the same
+        call.
         """
         model, rec_id = self._package_target(listing_id, product_id)
         kwargs: dict[str, Any] = {"write": bool(write)}
@@ -820,8 +823,11 @@ class FbMarketplaceOps(BaseOps):
                     length: Optional[float] = None,
                     width: Optional[float] = None,
                     height: Optional[float] = None) -> dict:
-        """Write package weight (lb) and box dimensions (inches)
-        (``fb_set_package``).
+        """Write package weight and box dimensions (``fb_set_package``).
+
+        *weight* is stored unchanged into ``product.weight``, so it is in
+        the database's weight unit (lb or kg per the
+        ``product.weight_in_lbs`` setting); dimensions are inches.
 
         Only the values passed are sent, as keywords; the server leaves an
         omitted one unchanged, so a weight-only or dims-only update never
