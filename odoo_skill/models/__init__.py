@@ -25,6 +25,8 @@ from .consignment import ConsignmentOps
 from .helpdesk import HelpdeskOps
 from .field_service import FieldServiceOps
 from .ebay_listing import EbayListingOps
+from .ebay_promotion import EbayPromotionOps
+from .ebay_best_offer import EbayBestOfferOps
 from .product_gui import ProductGuiOps
 from .itad import ITADOps
 from .fb_marketplace import FbMarketplaceOps
@@ -58,6 +60,8 @@ __all__ = [
     "HelpdeskOps",
     "FieldServiceOps",
     "EbayListingOps",
+    "EbayPromotionOps",
+    "EbayBestOfferOps",
     "ProductGuiOps",
     "ITADOps",
     "FbMarketplaceOps",
