@@ -1281,7 +1281,160 @@ class TestStagePolicies:
         assert out["staged"] == {}
 
 
+BOX = {"id": 14, "name": "Custom 11 x 8 x 4 in", "length": 10.98, "width": 7.99, "height": 4.02}
+TUBE = {"id": 3, "name": "UPS Tube", "length": 0.0, "width": 0.0, "height": 0.0}
+
+
+class TestStageBox:
+
+    def test_box_resolves_read_only_then_dims_save_then_box_write(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+        router.routes[(TMPL, "fb_resolve_box")] = lambda a, k: dict(BOX)
+        out = ops.stage_listing(7, box="11x8x4")
+        resolve = _by(mock_client, TMPL, "fb_resolve_box")
+        assert resolve and resolve[0][2] == ["11x8x4"]
+        vals = _saves(mock_client)[0]
+        assert (vals["ebay_pkg_length_in"], vals["ebay_pkg_width_in"],
+                vals["ebay_pkg_height_in"]) == (10.98, 7.99, 4.02)
+        assert "ebay_package_type_id" not in vals      # not wizard-editable
+        writes = [c for c in _by(mock_client, TMPL, "write")
+                  if "ebay_package_type_id" in c[2][1]]
+        # the saved dims ride along so sale_ebay's box autofill can't clobber them
+        assert writes and writes[0][2] == [[7], {"ebay_package_type_id": 14, "ebay_pkg_length_in": 10.98, "ebay_pkg_width_in": 7.99, "ebay_pkg_height_in": 4.02}]
+        assert _idx(mock_client, "ebay_wizard_save") < _idx(mock_client, "write",
+                                                            ebay_package_type_id=14)
+        assert out["staged"]["ebay_package_type_id"] == 14
+        assert out["package"]["dims_source"] == "field"
+        assert any("Box #14 Custom 11 x 8 x 4 in (10.98×7.99×4.02 in)" in n for n in out["notes"])
+
+    def test_explicit_dims_beat_the_box_size(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+        router.routes[(TMPL, "fb_resolve_box")] = lambda a, k: dict(BOX)
+        ops.stage_listing(7, box=14, dims="18x12x6")
+        vals = _saves(mock_client)[0]
+        assert vals["ebay_pkg_length_in"] == 18.0
+        assert _by(mock_client, TMPL, "fb_resolve_box")[0][2] == [14]
+        box_write = [c for c in _by(mock_client, TMPL, "write")
+                     if "ebay_package_type_id" in c[2][1]][0][2][1]
+        assert box_write == {"ebay_package_type_id": 14, "ebay_pkg_length_in": 18.0,
+                             "ebay_pkg_width_in": 12.0, "ebay_pkg_height_in": 6.0}
+
+    def test_vals_height_beats_the_box_size_in_stage(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+        router.routes[(TMPL, "fb_resolve_box")] = lambda a, k: dict(BOX)
+        ops.stage_listing(7, vals={"ebay_pkg_height_in": 9}, box=14)
+        vals = _saves(mock_client)[0]
+        assert (vals["ebay_pkg_length_in"], vals["ebay_pkg_height_in"]) == (10.98, 9.0)
+        box_write = [c for c in _by(mock_client, TMPL, "write")
+                     if "ebay_package_type_id" in c[2][1]][0][2][1]
+        assert box_write["ebay_pkg_height_in"] == 9.0
+
+    def test_sizeless_box_is_written_without_dims(self, ops, mock_client):
+        router = _stage_router(mock_client, PKG_TMPL)
+        router.routes[(TMPL, "fb_resolve_box")] = lambda a, k: dict(TUBE)
+        out = ops.stage_listing(7, box="UPS Tube")
+        assert "ebay_pkg_length_in" not in _saves(mock_client)[0]
+        assert out["staged"]["ebay_package_type_id"] == 3
+        assert any("(no size)" in n for n in out["notes"])
+        assert out["package"]["dims_source"] == "missing"
+
+    @pytest.mark.parametrize("value", ["", "none", "clear", False, 0])
+    def test_clearing_spellings_write_false_and_never_resolve(self, ops, mock_client, value):
+        _stage_router(mock_client, PKG_TMPL)
+        out = ops.stage_listing(7, box=value)
+        assert not _by(mock_client, TMPL, "fb_resolve_box")
+        writes = [c for c in _by(mock_client, TMPL, "write")
+                  if "ebay_package_type_id" in c[2][1]]
+        assert writes[0][2][1] == {"ebay_package_type_id": False}
+        assert out["staged"]["ebay_package_type_id"] is False
+        assert "Warehouse box cleared." in out["notes"]
+
+    def test_no_box_arg_touches_nothing(self, ops, mock_client):
+        _stage_router(mock_client, PKG_TMPL)
+        out = ops.stage_listing(7)
+        assert not _by(mock_client, TMPL, "fb_resolve_box")
+        assert not [c for c in _by(mock_client, TMPL, "write")
+                    if "ebay_package_type_id" in c[2][1]]
+        assert "ebay_package_type_id" not in out["staged"]
+
+    def test_server_box_error_propagates_before_any_write(self, ops, mock_client):
+        from odoo_skill.errors import OdooError
+        router = _stage_router(mock_client, PKG_TMPL)
+
+        def boom(a, k):
+            raise OdooError('2 boxes match "Box": #1 Box A, #2 Box B. Pick one by id.')
+        router.routes[(TMPL, "fb_resolve_box")] = boom
+        with pytest.raises(OdooError, match="Pick one by id"):
+            ops.stage_listing(7, box="Box")
+        assert not _saves(mock_client)
+
+    def test_old_server_without_fb_module_gets_a_plain_error(self, ops, mock_client):
+        from odoo_skill.errors import OdooError
+        router = _stage_router(mock_client, PKG_TMPL)
+
+        def missing(a, k):
+            raise OdooError("Odoo error on product.template.fb_resolve_box: AttributeError: "
+                            "The method 'fb_resolve_box' does not exist on the model 'product.template'")
+        router.routes[(TMPL, "fb_resolve_box")] = missing
+        with pytest.raises(OdooError, match="fb_marketplace_lister >= 4.4"):
+            ops.stage_listing(7, box=14)
+        # the method exists but raised → the server's own error surfaces
+        router.routes[(TMPL, "fb_resolve_box")] = lambda a, k: (_ for _ in ()).throw(
+            OdooError("Odoo error on product.template.fb_resolve_box: No box matches \"14\""))
+        with pytest.raises(OdooError, match="No box matches"):
+            ops.stage_listing(7, box=14)
+
+    @pytest.mark.parametrize("value", [1.5, [1], {"id": 1}])
+    def test_bad_box_value_refused_before_rpc(self, ops, mock_client, value):
+        _stage_router(mock_client, PKG_TMPL)
+        with pytest.raises(ValueError, match="box must be"):
+            ops.stage_listing(7, box=value)
+        assert not _calls(mock_client)
+
+
 class TestRevisePackage:
+
+    def test_box_dims_go_through_the_revise_stage_then_the_box_is_written(self, ops, mock_client):
+        Router(mock_client, {
+            (TMPL, "ebay_wizard_revise_stage"): {"success": True, "diff": [], "hash": "h",
+                                                "warnings": ["Nothing changed."]},
+            (TMPL, "fb_resolve_box"): lambda a, k: dict(BOX)})
+        out = ops.revise_stage(7, box="Custom 11")
+        vals = _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][1]
+        assert vals == {"ebay_pkg_length_in": 10.98, "ebay_pkg_width_in": 7.99,
+                        "ebay_pkg_height_in": 4.02}
+        assert _idx(mock_client, "ebay_wizard_revise_stage") < _idx(mock_client, "write",
+                                                                    ebay_package_type_id=14)
+        assert _by(mock_client, TMPL, "write")[0][2][1] == {"ebay_package_type_id": 14, **vals}
+        assert out["box_id"] == 14
+        assert out["warnings"][-1].startswith("Box #14 ")
+
+    def test_explicit_vals_beat_the_box_size_on_revise(self, ops, mock_client):
+        Router(mock_client, {
+            (TMPL, "ebay_wizard_revise_stage"): {"success": True, "diff": [], "hash": "h"},
+            (TMPL, "fb_resolve_box"): lambda a, k: dict(BOX)})
+        ops.revise_stage(7, vals={"ebay_pkg_height_in": 9}, box=14)
+        vals = _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][1]
+        assert vals == {"ebay_pkg_length_in": 10.98, "ebay_pkg_width_in": 7.99,
+                        "ebay_pkg_height_in": 9}
+        assert _by(mock_client, TMPL, "write")[0][2][1]["ebay_pkg_height_in"] == 9
+
+    def test_refused_revise_stage_does_not_write_the_box(self, ops, mock_client):
+        Router(mock_client, {
+            (TMPL, "ebay_wizard_revise_stage"): {"success": False, "reason": "not_live",
+                                                "message": "not live"},
+            (TMPL, "fb_resolve_box"): lambda a, k: dict(BOX)})
+        out = ops.revise_stage(7, box=14)
+        assert not _by(mock_client, TMPL, "write")
+        assert "box_id" not in out
+
+    def test_clearing_the_box_on_revise_keeps_the_dims(self, ops, mock_client):
+        Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {"success": True, "diff": [], "hash": "h"}})
+        out = ops.revise_stage(7, box="")
+        assert _by(mock_client, TMPL, "ebay_wizard_revise_stage")[0][2][1] == {}
+        assert _by(mock_client, TMPL, "write")[0][2] == [[7], {"ebay_package_type_id": False}]
+        assert out["box_id"] is False
+
 
     def test_weight_and_dims_become_vals(self, ops, mock_client):
         Router(mock_client, {(TMPL, "ebay_wizard_revise_stage"): {"success": True, "diff": [], "hash": "h"}})
