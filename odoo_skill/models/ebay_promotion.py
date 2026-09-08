@@ -34,7 +34,8 @@ _LIST_FIELDS = [
 ]
 
 _DETAIL_FIELDS = _LIST_FIELDS + [
-    "description", "markdown_kind", "markdown_percent", "markdown_amount",
+    "description", "promotion_image_url",
+    "markdown_kind", "markdown_percent", "markdown_amount",
     "tier_ids", "order_mode", "order_threshold_amount", "order_threshold_qty",
     "order_benefit_kind", "order_percent", "order_amount",
     "bogo_buy_qty", "bogo_get_qty", "bogo_percent",
