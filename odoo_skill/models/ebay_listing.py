@@ -380,6 +380,10 @@ class EbayListingOps(BaseOps):
         "action_ebay_research_comps",
         "action_end_single_listing",
         "action_ebay_listing_per_variant",
+        # Stale-listing digest (sale_ebay >= 1.47.0); each re-validates its
+        # verdict and the promotions group server-side before touching eBay.
+        "action_ebay_stale_cut",
+        "action_ebay_stale_end_and_scrap",
     })
     #: Alias so existing callers of :meth:`run_product_action` keep working.
     ALLOWED_PRODUCT_ACTIONS = ALLOWED_ACTIONS
@@ -1455,7 +1459,8 @@ class EbayListingOps(BaseOps):
 
     def set_sold_comps(self, product_tmpl_id: int, prices: list[float],
                        source: str = "ebay_sold_browser",
-                       listings: Optional[list[dict]] = None) -> dict:
+                       listings: Optional[list[dict]] = None,
+                       stamp: bool = True) -> dict:
         """Store externally gathered comps (e.g. sold prices read from eBay in
         a browser) as the product's comp aggregates.
 
@@ -1463,7 +1468,14 @@ class EbayListingOps(BaseOps):
         browser. Writes ``ebay_comp_low/p25/median/high/count/fetched_at`` and
         a JSON note of the raw prices; ``ebay_suggested_price`` and
         ``ebay_comp_note`` are Odoo-computed from these, so the cost floor
-        and anchor rules still apply. Refuses on fewer than 3 prices.
+        and anchor rules still apply. Refuses on fewer than 3 prices — call
+        :meth:`record_no_comps` for that case so the stale digest can tell
+        "no sold comps" from "never researched".
+
+        With *stamp* (default) and a server that has the stale digest, the
+        sold-check stamp (``ebay_sold_checked_at``) is written right after
+        the aggregates; the server refuses the stamp unless the JSON source
+        is ``ebay_sold_browser``.
         """
         self._require()
         clean = sorted(float(p) for p in (prices or []) if p and float(p) > 0)
@@ -1484,8 +1496,13 @@ class EbayListingOps(BaseOps):
             }),
         }
         self.client.write(self.MODEL, product_tmpl_id, vals)
+        stamped = False
+        if stamp and source == "ebay_sold_browser" and self._has_stale_digest():
+            self.client.execute(self.MODEL, "ebay_stale_mark_sold_checked", [product_tmpl_id])
+            stamped = True
         pricing = self.get_pricing(product_tmpl_id)
         pricing["written"] = True
+        pricing["stamped"] = stamped
         pricing["summary"] = (
             f"{len(clean)} sold comps: low {clean[0]:.2f} / median "
             f"{vals['ebay_comp_median']:.2f} / high {clean[-1]:.2f}. " + pricing["summary"])
@@ -1621,6 +1638,191 @@ class EbayListingOps(BaseOps):
             "before": pricing,
             "after": after,
         }
+
+    # ── Stale-listing digest (sale_ebay >= 1.47.0) ───────────────────
+    #
+    # The server owns the rules (age buckets, verdicts, cost floor, the
+    # 25% cut ceiling, scrap safety). These wrappers only add dry runs,
+    # summaries and the ``confirm`` gate; nothing here decides a price.
+
+    def _has_stale_digest(self) -> bool:
+        self._require()
+        return "ebay_stale_verdict" in (self._model_field_cache or set())
+
+    def _require_stale_digest(self) -> None:
+        if not self._has_stale_digest():
+            raise OdooError("The stale-listing digest needs sale_ebay >= 1.47.0 "
+                            "(product.template has no ebay_stale_verdict).")
+
+    @staticmethod
+    def _stale_row_text(row: dict) -> str:
+        """One digest line for a review row."""
+        name = (row.get("name") or "")[:40]
+        price = row.get("price") or 0.0
+        v = row.get("verdict")
+        if v == "cut":
+            return (f"#{row['id']} {name} ${price:.0f} → ${row.get('suggested') or 0:.0f} "
+                    f"(−{row.get('discount_pct') or 0:.1f}%, med ${row.get('comp_median') or 0:.0f} "
+                    f"n={row.get('comp_count') or 0})")
+        if v == "promo":
+            return (f"#{row['id']} {name} ${price:.0f} · med ${row.get('comp_median') or 0:.0f} "
+                    f"(n={row.get('comp_count') or 0}) → {row.get('promo_pct') or 0}% markdown")
+        if v == "end":
+            return (f"#{row['id']} {name} ${price:.0f} · no sold comps · "
+                    f"on hand {row.get('qty_on_hand') or 0:g}")
+        return f"#{row['id']} {name} ${price:.0f} · {row.get('note') or v}"
+
+    def stale_review(self, limit: Optional[int] = None,
+                     buckets: Optional[list[str]] = None) -> dict:
+        """Age-bucketed review of unsold live listings with server verdicts.
+
+        Returns the server payload (``counts``, ``buckets``,
+        ``needs_research``) plus per-row ``text`` and a ``summary``.
+
+        Classified as a read (no ``--confirm``) on purpose: the only thing
+        the server touches is ``ebay_days_listed``, a stored field derived
+        from ``ebay_start_date`` and today's date, which it recomputes so
+        the buckets track the calendar (the same recompute the daily
+        ``sale_ebay`` cron does). No listing, price or stock data changes.
+        """
+        self._require_stale_digest()
+        kwargs: dict[str, Any] = {}
+        if limit:
+            kwargs["limit"] = int(limit)
+        if buckets:
+            kwargs["buckets"] = list(buckets)
+        res = self.client.execute(self.MODEL, "ebay_stale_review", **kwargs) or {}
+        for rows in (res.get("buckets") or {}).values():
+            for row in rows:
+                row["text"] = self._stale_row_text(row)
+        c = res.get("counts") or {}
+        bv = c.get("by_verdict") or {}
+        res["summary"] = (
+            f"Live {c.get('live', 0)} · unsold {c.get('unsold', 0)} · "
+            f"needs research {c.get('needs_research', 0)} · "
+            f"promo {bv.get('promo', 0)} · cut {bv.get('cut', 0)} · "
+            f"end {bv.get('end', 0)} · hold {bv.get('hold', 0) + bv.get('nocomps', 0)}")
+        return res
+
+    def stale_needs_research(self, limit: Optional[int] = None,
+                             buckets: Optional[list[str]] = None) -> list[int]:
+        """Product ids that still need a sold-comps check, oldest first
+        (never researched, then re-check TTL expired / Browse-overwritten)."""
+        ids = list(self.stale_review(buckets=buckets).get("needs_research") or [])
+        return ids[:int(limit)] if limit else ids
+
+    def record_no_comps(self, product_tmpl_id: int) -> dict:
+        """A sold check ran and found < 3 comparable sales: zero the
+        aggregates and stamp the sold check so the verdict becomes
+        ``nocomps`` / ``end`` instead of "not researched"."""
+        self._require_stale_digest()
+        self.client.execute(self.MODEL, "ebay_stale_record_no_comps", [product_tmpl_id])
+        row = self.client.read(self.MODEL, [product_tmpl_id],
+                               fields=["name", "ebay_stale_verdict", "ebay_stale_verdict_note"])
+        rec = row[0] if row else {}
+        return {"recorded": True, "verdict": rec.get("ebay_stale_verdict"),
+                "summary": f"{rec.get('name')}: no sold comps recorded → "
+                           f"{rec.get('ebay_stale_verdict')} ({rec.get('ebay_stale_verdict_note')})"}
+
+    def mark_sold_checked(self, product_tmpl_id: int) -> dict:
+        """Stamp ``ebay_sold_checked_at`` on comps already written with
+        source ``ebay_sold_browser`` (the server refuses anything else)."""
+        self._require_stale_digest()
+        self.client.execute(self.MODEL, "ebay_stale_mark_sold_checked", [product_tmpl_id])
+        return {"stamped": True, "product_tmpl_id": product_tmpl_id}
+
+    def _stale_current(self, product_tmpl_id: int) -> dict:
+        rows = self.client.read(self.MODEL, [product_tmpl_id], fields=[
+            "name", "ebay_fixed_price", "ebay_suggested_price",
+            "ebay_suggested_discount_pct", "ebay_comp_median", "ebay_comp_count",
+            "ebay_days_listed", "ebay_age_bucket", "ebay_stale_verdict",
+            "ebay_stale_verdict_note", "ebay_stale_promo_pct", "ebay_listing_status"])
+        if not rows:
+            raise OdooError(f"product.template {product_tmpl_id} not found")
+        return rows[0]
+
+    def apply_stale_cut(self, product_tmpl_id: int, max_discount_pct: float = 25.0,
+                        confirm: bool = False) -> dict:
+        """Push the server's suggested price to eBay for a ``cut`` verdict.
+
+        Dry run unless ``confirm=True``. Unlike :meth:`apply_suggested_price`
+        (local write only) this reaches eBay via ``action_ebay_stale_cut``,
+        which re-checks the verdict, the ceiling and the promotions group.
+        """
+        self._require_stale_digest()
+        rec = self._stale_current(product_tmpl_id)
+        cur, new = rec.get("ebay_fixed_price") or 0.0, rec.get("ebay_suggested_price") or 0.0
+        pct = rec.get("ebay_suggested_discount_pct") or 0.0
+        if rec.get("ebay_stale_verdict") != "cut":
+            return {"applied": False, "record": rec,
+                    "summary": f"Refused: {rec.get('name')} is not a cut candidate "
+                               f"({rec.get('ebay_stale_verdict_note') or rec.get('ebay_stale_verdict')})."}
+        if pct > float(max_discount_pct):
+            return {"applied": False, "record": rec,
+                    "summary": f"Refused: suggested cut of {pct:.1f}% exceeds the "
+                               f"{float(max_discount_pct):.1f}% ceiling. Raise max_discount_pct to override."}
+        if not confirm:
+            return {"applied": False, "record": rec,
+                    "summary": f"Dry run — would cut {rec.get('name')} {cur:.2f} → {new:.2f} "
+                               f"(−{pct:.1f}%) on eBay. Pass confirm=True to apply."}
+        result = self.client.execute(self.MODEL, "action_ebay_stale_cut", [product_tmpl_id],
+                                     max_discount_pct=float(max_discount_pct)) or {}
+        return {"applied": True, "result": result,
+                "summary": f"Cut applied on eBay: {rec.get('name')} "
+                           f"{result.get('old_price', cur):.2f} → {result.get('new_price', new):.2f} "
+                           f"(−{result.get('discount_pct', pct):.1f}%)"}
+
+    def stale_end_preview(self, product_tmpl_id: int) -> dict:
+        """What :meth:`end_stale_scrap` would do: listing state and the
+        on-hand units (per location / lot) that would be scrapped."""
+        self._require_stale_digest()
+        prev = self.client.execute(self.MODEL, "ebay_stale_end_preview", [product_tmpl_id]) or {}
+        rec = self._stale_current(product_tmpl_id)
+        lots = ", ".join(
+            f"{s.get('qty'):g}@{s.get('location')}" + (f" lot {s['lot']}" if s.get("lot") else "")
+            for s in prev.get("scrap") or []) or "nothing on hand"
+        prev["record"] = rec
+        prev["summary"] = (f"{rec.get('name')}: listing {prev.get('listing_status')}, "
+                           f"would scrap {prev.get('total_qty', 0):g} unit(s): {lots}")
+        return prev
+
+    def end_stale_scrap(self, product_tmpl_id: int, confirm: bool = False) -> dict:
+        """End the listing, scrap every on-hand unit and archive the product
+        (``end`` verdict only). Dry run unless ``confirm=True``."""
+        self._require_stale_digest()
+        prev = self.stale_end_preview(product_tmpl_id)
+        rec = prev["record"]
+        if rec.get("ebay_stale_verdict") != "end":
+            return {"ended": False, "preview": prev,
+                    "summary": f"Refused: {rec.get('name')} is not an end candidate "
+                               f"({rec.get('ebay_stale_verdict_note') or rec.get('ebay_stale_verdict')})."}
+        if not confirm:
+            return {"ended": False, "preview": prev,
+                    "summary": f"Dry run — {prev['summary']}. Pass confirm=True to end + scrap + archive."}
+        result = self.client.execute(self.MODEL, "action_ebay_stale_end_and_scrap",
+                                     [product_tmpl_id]) or {}
+        n = sum(float(s.get("qty") or 0) for s in result.get("scrapped") or [])
+        return {"ended": bool(result.get("ended")), "result": result, "preview": prev,
+                "summary": f"{rec.get('name')}: listing "
+                           f"{'ended' if result.get('ended') else 'was not live'}, "
+                           f"scrapped {n:g} unit(s)"
+                           f"{', product archived' if result.get('archived') else ''}."}
+
+    def create_stale_promo(self, product_ids: list[int], pct: Optional[int] = None) -> dict:
+        """Draft ONE markdown promotion for a batch of 30-day ``promo``
+        verdicts (server picks the shallowest floor-safe pct when *pct* is
+        omitted). Pushing stays behind ``ebay_promo`` approve."""
+        self._require_stale_digest()
+        ids = [int(i) for i in (product_ids or [])]
+        if not ids:
+            raise OdooError("create_stale_promo needs at least one product id")
+        kwargs = {"pct": int(pct)} if pct is not None else {}
+        res = self.client.execute(self.MODEL, "action_ebay_stale_promo", ids, **kwargs) or {}
+        res["summary"] = (
+            f"{'Existing' if res.get('existing') else 'Drafted'} promo #{res.get('promotion_id')} "
+            f"'{res.get('name')}' at {res.get('pct')}% for {len(res.get('product_ids') or ids)} "
+            f"product(s) — not on eBay until `approve promo {res.get('promotion_id')}`.")
+        return res
 
     def run_product_action(
         self, product_tmpl_id: int, method: str, **kwargs: Any
