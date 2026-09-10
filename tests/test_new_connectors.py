@@ -220,6 +220,56 @@ class TestFbMarketplace:
         assert "listing closed" in out["summary"]
         assert "action_mark_sold" not in [c[1] for c in _calls(mock_client)]
 
+    def test_mark_sold_closed_reports_temp_product_archived(self, fb, mock_client):
+        """A closed sale on a temp item archives its product server-side; the
+        reply must say so (read by id so the archived row still comes back)."""
+        sale = {"success": True, "sale_id": 3, "qty": 1.0, "price": 120.0,
+                "closed": True, "remaining": 0.0}
+        mock_client._models.execute_kw.side_effect = [
+            sale,
+            [{"id": 7, "name": "Bose A20", "state": "sold", "price": 150.0,
+              "is_temp": True, "product_tmpl_id": [2572, "Bose A20"]}],
+            [{"id": 2572, "active": False}],
+        ]
+        out = fb.mark_sold(7, price=120, ref="tg-1")
+        model, method, args, kw = _calls(mock_client)[2]
+        assert (model, method, args) == ("product.template", "read", [[2572]])
+        assert kw == {"fields": ["active"]}
+        assert out["summary"].endswith("; listing closed; product #2572 archived")
+
+    def test_mark_sold_closed_flags_product_left_active(self, fb, mock_client):
+        """If the product is still active after a closing sale, say it loudly;
+        a catalog product is expected to stay, a temp one is not."""
+        sale = {"success": True, "qty": 1.0, "price": 5.0, "closed": True, "remaining": 0.0}
+        mock_client._models.execute_kw.side_effect = [
+            sale,
+            [{"id": 7, "name": "X", "state": "sold", "price": 5.0,
+              "is_temp": True, "product_tmpl_id": [99, "X"]}],
+            [{"id": 99, "active": True}],
+        ]
+        assert fb.mark_sold(7, ref="a")["summary"].endswith("; product #99 still active")
+        mock_client._models.execute_kw.side_effect = [
+            sale,
+            [{"id": 8, "name": "Y", "state": "sold", "price": 5.0,
+              "is_temp": False, "product_tmpl_id": [100, "Y"]}],
+            [{"id": 100, "active": True}],
+        ]
+        assert fb.mark_sold(8, ref="b")["summary"].endswith(
+            "; product #100 still active (catalog product, kept)")
+
+    def test_mark_sold_archive_readback_failure_keeps_sale(self, fb, mock_client):
+        """The sale already happened; a failed read-back is a note, not an error."""
+        sale = {"success": True, "qty": 1.0, "price": 5.0, "closed": True, "remaining": 0.0}
+        mock_client._models.execute_kw.side_effect = [
+            sale,
+            [{"id": 7, "name": "X", "state": "sold", "price": 5.0,
+              "is_temp": True, "product_tmpl_id": [99, "X"]}],
+            RuntimeError("boom"),
+        ]
+        out = fb.mark_sold(7, ref="a")
+        assert out["sale"] == sale
+        assert "product #99 archive status unknown (boom)" in out["summary"]
+
     def test_mark_sold_omits_unset_price_and_close(self, fb, mock_client):
         """price=None must NOT reach the server (None → module treats as list
         price only when absent; XML-RPC cannot marshal None anyway)."""

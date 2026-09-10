@@ -700,7 +700,30 @@ class FbMarketplaceOps(BaseOps):
                 + ("; listing closed" if sale.get("closed") else
                    f"; {sale.get('remaining', '?')} left, listing stays live")
             )
+            if sale.get("closed"):
+                summary += self._archive_note(record)
         return {"summary": summary, "sale": sale, "listing": record}
+
+    def _archive_note(self, record: dict) -> str:
+        """Say whether the closed listing's product got archived. The module
+        archives a temp product when its listing closes on a sale; a catalog
+        product stays active on purpose. Read by id (not search) so an
+        archived row still comes back; a read failure must not undo a sale
+        that already happened, so it degrades to a note."""
+        tmpl = record.get("product_tmpl_id")
+        tmpl_id = tmpl[0] if isinstance(tmpl, (list, tuple)) else tmpl
+        if not tmpl_id:
+            return ""
+        try:
+            rows = self.client.read("product.template", int(tmpl_id), ["active"])
+        except Exception as exc:  # noqa: BLE001 - surface, never raise after the sale
+            return f"; product #{tmpl_id} archive status unknown ({exc})"
+        if not rows:
+            return f"; product #{tmpl_id} archive status unknown"
+        if rows[0].get("active"):
+            return (f"; product #{tmpl_id} still active"
+                    + ("" if record.get("is_temp") else " (catalog product, kept)"))
+        return f"; product #{tmpl_id} archived"
 
     def record_sale(self, listing_id: int) -> dict:
         """After the fact: invoice every cash sale on a listing that has no
