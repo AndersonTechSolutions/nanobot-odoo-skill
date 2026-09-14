@@ -67,6 +67,9 @@ _LIST_FIELDS = [
     "id", "name", "product_tmpl_id", "state", "condition", "price",
     "suggested_price", "listed_date", "renewal_date", "listing_url",
     *_PACKAGE_FIELDS,
+    # fb_marketplace_lister 4.9 pending state: the Facebook-side action the
+    # lister still owes (dropped by _existing() on an older module).
+    "fb_sync_action", "fb_sync_error",
 ]
 
 _DETAIL_FIELDS = _LIST_FIELDS + [
@@ -163,13 +166,45 @@ class FbMarketplaceOps(BaseOps):
         "fb_invoice_sales",
         # package (4.2): read the product's weight from a Ventor scale
         "action_read_scale",
+        # pending (4.9): Odoo state flips + the agent's report-back
+        "action_mark_pending",
+        "action_mark_available",
+        "fb_sync_done",
     })
+
+    #: Facebook-side actions ``sync_queue`` can carry (module 4.9).
+    SYNC_ACTIONS = ("mark_pending", "mark_available")
 
     # ── Reads ────────────────────────────────────────────────────────
 
     def active_listings(self, limit: int = 50) -> list[dict]:
         """Listings currently live on Marketplace."""
         return self.search([["state", "=", "listed"]], limit=limit)
+
+    def pending_listings(self, limit: int = 50) -> list[dict]:
+        """Listings with a buyer lined up (module 4.9 ``pending`` state); the
+        post is still on Facebook, shown as Pending."""
+        return self.search([["state", "=", "pending"]], limit=limit)
+
+    def sync_queue(self, limit: int = 50) -> list[dict]:
+        """Facebook-side actions Odoo is waiting on, oldest request first.
+
+        Each row carries ``fb_sync_action`` (``mark_pending`` /
+        ``mark_available``), the Marketplace ``listing_url`` to act on, and
+        ``fb_sync_error`` from the last failed attempt (``False`` when none).
+        Rows with an error are still queued: report them, do not retry
+        blindly. ``fb_sync_done`` closes a row. Raises on a module older
+        than 4.9 (no queue to read).
+        """
+        self._require()
+        try:
+            rows = self.client.execute(self.MODEL, "fb_sync_queue", limit=int(limit))
+        except OdooError as exc:
+            if server_lacks_method(exc, "fb_sync_queue"):
+                raise OdooError("The Facebook sync queue needs fb_marketplace_lister "
+                                ">= 4.9 on this server.") from exc
+            raise
+        return rows if isinstance(rows, list) else []
 
     def draft_listings(self, limit: int = 50) -> list[dict]:
         """Listings prepared but not yet posted to Marketplace."""
@@ -744,6 +779,34 @@ class FbMarketplaceOps(BaseOps):
     def mark_renewed(self, listing_id: int) -> dict:
         """Record that the listing was renewed on Facebook, resetting the clock."""
         return self.run_action(listing_id, "action_renewed")
+
+    def mark_pending(self, listing_id: int, sync: bool = True) -> dict:
+        """Listed -> pending (a buyer is lined up; the post stays up).
+
+        ``sync=True`` (default) is the operator's instruction: Odoo queues a
+        ``mark_pending`` row for the browser half to press Facebook's "Mark
+        as pending". ``sync=False`` is the reconcile write-back for a post
+        Facebook already shows as pending - state only, nothing queued.
+        """
+        return self.run_action(listing_id, "action_mark_pending", sync=bool(sync))
+
+    def mark_available(self, listing_id: int, sync: bool = True) -> dict:
+        """Pending -> listed (the deal fell through). Same ``sync`` contract
+        as :meth:`mark_pending`, for Facebook's "Mark as available"."""
+        return self.run_action(listing_id, "action_mark_available", sync=bool(sync))
+
+    def mark_synced(self, listing_id: int, ok: bool = True,
+                    note: Optional[str] = None) -> dict:
+        """Report the queued Facebook action back (``fb_sync_done``).
+
+        ``ok=True`` clears the queue row; ``ok=False`` keeps it queued, stores
+        ``note`` as ``fb_sync_error`` and hands the listing's creator a to-do.
+        ``note`` is truncated server-side to 200 chars.
+        """
+        kwargs: dict[str, Any] = {"ok": bool(ok)}
+        if note:
+            kwargs["note"] = str(note)[:200]
+        return self.run_action(listing_id, "fb_sync_done", **kwargs)
 
     def end_listing(self, listing_id: int) -> dict:
         """Withdraw a listing without a sale."""

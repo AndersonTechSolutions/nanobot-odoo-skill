@@ -632,6 +632,56 @@ class TestFbMarketplace:
         assert _differs(19.99, 19.99) is False
         assert _differs(0.1 + 0.2, 0.3) is False
 
+    # ── pending state + Facebook sync queue (module 4.9) ──────────────
+    def test_sync_queue_is_a_model_method_with_limit(self, fb, mock_client):
+        """fb_sync_queue is @api.model: no ids vector, limit as an Odoo kwarg."""
+        row = {"listing_id": 7, "name": "X", "state": "pending",
+               "listing_url": "https://www.facebook.com/marketplace/item/1/",
+               "fb_sync_action": "mark_pending", "fb_sync_requested": "2026-09-14 10:00:00",
+               "fb_sync_error": False}
+        mock_client._models.execute_kw.return_value = [row]
+        assert fb.sync_queue(limit=5) == [row]
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "fb_sync_queue", [])
+        assert kw == {"limit": 5}
+
+    def test_sync_queue_names_the_module_version_when_missing(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = OdooError(
+            "The method 'fb_sync_queue' does not exist on the model 'fb.marketplace.listing'")
+        with pytest.raises(OdooError, match="4.9"):
+            fb.sync_queue()
+
+    def test_mark_pending_forwards_sync_flag(self, fb, mock_client):
+        """sync=False is the reconcile write-back: state only, nothing queued."""
+        mock_client._models.execute_kw.side_effect = [
+            True, [{"id": 7, "name": "X", "state": "pending", "fb_sync_action": False}]]
+        fb.mark_pending(7, sync=False)
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "action_mark_pending", [[7]])
+        assert kw == {"sync": False}
+
+    def test_mark_available_defaults_to_sync(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            True, [{"id": 7, "name": "X", "state": "listed", "fb_sync_action": "mark_available"}]]
+        fb.mark_available(7)
+        _, method, args, kw = _calls(mock_client)[0]
+        assert (method, args, kw) == ("action_mark_available", [[7]], {"sync": True})
+
+    def test_mark_synced_failure_carries_a_truncated_note(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [{"listing_id": 7}], [{"id": 7, "name": "X", "state": "pending"}]]
+        fb.mark_synced(7, ok=False, note="n" * 300)
+        _, method, args, kw = _calls(mock_client)[0]
+        assert (method, args) == ("fb_sync_done", [[7]])
+        assert kw == {"ok": False, "note": "n" * 200}
+
+    def test_mark_synced_ok_sends_no_note(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [{"listing_id": 7}], [{"id": 7, "name": "X", "state": "pending"}]]
+        fb.mark_synced(7)
+        _, _, _, kw = _calls(mock_client)[0]
+        assert kw == {"ok": True}
+
 
 # ── Inbound shipments ────────────────────────────────────────────────
 
