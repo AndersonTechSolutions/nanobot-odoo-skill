@@ -41,6 +41,7 @@ class InventoryOps:
     QUANT_MODEL = "stock.quant"
     PICKING_MODEL = "stock.picking"
     MOVE_MODEL = "stock.move"
+    MOVE_LINE_MODEL = "stock.move.line"
     SCRAP_MODEL = "stock.scrap"
     LOCATION_MODEL = "stock.location"
     PICKING_TYPE_MODEL = "stock.picking.type"
@@ -328,8 +329,35 @@ class InventoryOps:
                     "state": state,
                     "blocked": f"could not reserve stock (state {state}); check the bin has {quantity} on hand"}
 
-        for mv in self.client.read(self.PICKING_MODEL, picking_id, fields=["move_ids"])[0]["move_ids"]:
-            self.client.write(self.MOVE_MODEL, mv, {"quantity": quantity, "picked": True})
+        for move_id in self.client.read(self.PICKING_MODEL, picking_id,
+                                        fields=["move_ids"])[0]["move_ids"]:
+            lines = self.client.search_read(
+                self.MOVE_LINE_MODEL, [["move_id", "=", move_id]],
+                fields=["id", "quantity", "lot_id"], limit=50,
+            )
+            if lot_id is not None:
+                # Serial/lot tracked: pin the exact unit. action_assign may
+                # have reserved a different serial, so force ours onto one line
+                # and zero any others.
+                if lines:
+                    self.client.write(self.MOVE_LINE_MODEL, lines[0]["id"],
+                                      {"lot_id": lot_id, "quantity": quantity})
+                    for extra in lines[1:]:
+                        self.client.write(self.MOVE_LINE_MODEL, extra["id"], {"quantity": 0})
+                else:
+                    self.client.create(self.MOVE_LINE_MODEL, {
+                        "move_id": move_id, "product_id": product_id,
+                        "location_id": source_location_id, "location_dest_id": rec,
+                        "lot_id": lot_id, "quantity": quantity,
+                    })
+            elif lines:
+                for ln in lines:
+                    self.client.write(self.MOVE_LINE_MODEL, ln["id"],
+                                      {"quantity": ln.get("quantity") or quantity})
+            else:
+                # Untracked with no reservation line — set the done qty on the move.
+                self.client.write(self.MOVE_MODEL, move_id, {"quantity": quantity})
+            self.client.write(self.MOVE_MODEL, move_id, {"picked": True})
         result = self.client.execute(self.PICKING_MODEL, "button_validate", [picking_id])
         if isinstance(result, dict):
             return {"product": prod["name"], "picking": picking_id,
