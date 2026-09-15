@@ -121,10 +121,12 @@ _GAP_FIELDS = [
 ]
 
 #: ``state`` values, in lifecycle order.
-STATES = ["draft", "listed", "renewal_due", "sold", "ended"]
+STATES = ["draft", "listed", "renewal_due", "pending", "sold", "ended"]
 
 #: States a listing is still working in — not yet sold or withdrawn.
-OPEN_STATES = ["draft", "listed", "renewal_due"]
+#: ``pending`` (module 4.9: buyer lined up) is still open — the post is up and
+#: a second draft for the same product would be a duplicate.
+OPEN_STATES = ["draft", "listed", "renewal_due", "pending"]
 
 #: ``condition`` values accepted by the module.
 CONDITIONS = ["new", "refurbished", "like_new", "good", "fair", "for_parts"]
@@ -796,16 +798,24 @@ class FbMarketplaceOps(BaseOps):
         return self.run_action(listing_id, "action_mark_available", sync=bool(sync))
 
     def mark_synced(self, listing_id: int, ok: bool = True,
-                    note: Optional[str] = None) -> dict:
+                    note: Optional[str] = None, action: Optional[str] = None) -> dict:
         """Report the queued Facebook action back (``fb_sync_done``).
 
         ``ok=True`` clears the queue row; ``ok=False`` keeps it queued, stores
         ``note`` as ``fb_sync_error`` and hands the listing's creator a to-do.
-        ``note`` is truncated server-side to 200 chars.
+        ``note`` is truncated server-side to 200 chars. ``action`` names the
+        request the browser actually performed (one of :data:`SYNC_ACTIONS`);
+        the server ignores the report as stale if the queue has since moved on
+        to a different action (``returned[0]["acknowledged"]`` is False).
+        Always pass it from an automated run.
         """
         kwargs: dict[str, Any] = {"ok": bool(ok)}
         if note:
             kwargs["note"] = str(note)[:200]
+        if action:
+            if action not in self.SYNC_ACTIONS:
+                raise OdooError(f"action must be one of {', '.join(self.SYNC_ACTIONS)}")
+            kwargs["action"] = action
         return self.run_action(listing_id, "fb_sync_done", **kwargs)
 
     def end_listing(self, listing_id: int) -> dict:

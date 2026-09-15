@@ -675,6 +675,20 @@ class TestFbMarketplace:
         assert (method, args) == ("fb_sync_done", [[7]])
         assert kw == {"ok": False, "note": "n" * 200}
 
+    def test_mark_synced_passes_the_action_and_rejects_unknown_ones(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            [{"listing_id": 7, "acknowledged": True}], [{"id": 7, "name": "X", "state": "listed"}]]
+        fb.mark_synced(7, action="mark_available")
+        _, _, _, kw = _calls(mock_client)[0]
+        assert kw == {"ok": True, "action": "mark_available"}
+        with pytest.raises(OdooError, match="action must be one of"):
+            fb.mark_synced(7, action="mark_sold")
+
+    def test_pending_counts_as_open_for_duplicate_checks_and_summary(self):
+        from odoo_skill.models.fb_marketplace import OPEN_STATES, STATES
+        assert "pending" in OPEN_STATES
+        assert "pending" in STATES
+
     def test_mark_synced_ok_sends_no_note(self, fb, mock_client):
         mock_client._models.execute_kw.side_effect = [
             [{"listing_id": 7}], [{"id": 7, "name": "X", "state": "pending"}]]
