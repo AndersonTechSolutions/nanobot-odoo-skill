@@ -23,7 +23,7 @@ _ORDER_DETAIL_FIELDS = _ORDER_LIST_FIELDS + [
 
 _LINE_FIELDS = [
     "id", "product_id", "name", "product_uom_qty",
-    "price_unit", "discount", "price_subtotal", "tax_ids",
+    "price_unit", "discount", "price_subtotal", "tax_id",
 ]
 
 
