@@ -79,6 +79,11 @@ _DETAIL_FIELDS = _LIST_FIELDS + [
     # fb_marketplace_lister 4.x per-sale history; dropped by _existing()
     # on databases still running an older module.
     "sold_price", "sold_qty", "sale_count", "can_record_sale",
+    # fb_marketplace_lister 4.12 description template: ``description`` is the
+    # body only; ``description_full`` (body + pickup / shipping / payment /
+    # credit-card footer) is what goes on Facebook. Dropped by _existing()
+    # on an older module, so posters fall back to ``description``.
+    "description_full", "description_footer", "accept_cards",
 ]
 
 #: ``product.template`` model the package RPCs live on; the listing's own
@@ -524,6 +529,7 @@ class FbMarketplaceOps(BaseOps):
         condition: str = "refurbished",
         location_id: Optional[int] = None,
         shippable: Optional[bool] = None,
+        accept_cards: Optional[bool] = None,
     ) -> dict:
         """Draft an FB listing for a catalog / eBay-live product (``fb <ref>``).
 
@@ -576,6 +582,9 @@ class FbMarketplaceOps(BaseOps):
             extra["location_id"] = int(location_id)
         if shippable is not None:
             extra["shippable"] = bool(shippable)
+        if accept_cards is not None:
+            # 4.12 description-template flag; unset = the Settings default.
+            extra["accept_cards"] = bool(accept_cards)
         created = self.create_listing(
             product_tmpl_id, condition=condition,
             description=_plain_text(tmpl.get("description_sale")) or None,
@@ -855,6 +864,9 @@ class FbMarketplaceOps(BaseOps):
                 "then mark_listed once the post is up."
             ),
             "description": record.get("description"),
+            # 4.12: body + template footer, the text to put on Facebook
+            # (absent on an older module).
+            "description_full": record.get("description_full"),
             "listing": record,
         }
 

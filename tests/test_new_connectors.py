@@ -594,6 +594,47 @@ class TestFbMarketplace:
         assert "No stock on hand." in out["notes"]
         assert "action_generate_ai_content" not in [c[1] for c in _calls(mock_client)]
 
+    def test_create_from_product_forwards_accept_cards_and_reads_description_full(
+            self, fb, mock_client):
+        """4.12 description template: the flag reaches the create and the
+        full (body + footer) text comes back from get / generate_content."""
+        from odoo_skill.errors import OdooError
+        tmpl = {"id": 42, "name": "Drum", "list_price": 20.0, "qty_available": 1.0,
+                "type": "product", "description_sale": False, "fb_temp": False}
+        draft = {"id": 12, "name": "Drum", "state": "draft", "description": "Body.",
+                 "description_full": "Body.\n\nPickup in Clearwater.\nCards OK.",
+                 "accept_cards": True}
+
+        def side_effect(db, uid, key, model, method, args, kw=None):
+            fields = (kw or {}).get("fields") or []
+            if method == "read" and model == "product.template" and "ebay_listed" in fields:
+                raise OdooError("Invalid field ebay_listed")
+            if method == "read" and model == "product.template":
+                return [tmpl]
+            if method == "search_read":
+                return []
+            if method == "create":
+                return 12
+            if method == "read":
+                return [draft]
+            if method == "action_generate_ai_content":
+                return True
+            raise AssertionError(method)
+
+        mock_client._models.execute_kw.side_effect = side_effect
+        out = fb.create_from_product(42, generate=False, accept_cards=True)
+        create = next(c for c in _calls(mock_client) if c[1] == "create")
+        assert create[2][0]["accept_cards"] is True
+        assert out["listing"]["description_full"].endswith("Cards OK.")
+        # Unset → not sent, so the Settings default applies server-side.
+        mock_client._models.execute_kw.reset_mock()
+        fb.create_from_product(42, generate=False)
+        create = next(c for c in _calls(mock_client) if c[1] == "create")
+        assert "accept_cards" not in create[2][0]
+        gen = fb.generate_content(12)
+        assert gen["description"] == "Body."
+        assert gen["description_full"].startswith("Body.\n\nPickup")
+
     def test_create_from_product_surfaces_access_errors_on_ebay_read(self, fb, mock_client):
         from odoo_skill.errors import OdooAccessError
         tmpl = {"id": 42, "name": "Drum", "list_price": 20.0, "qty_available": 0.0,
