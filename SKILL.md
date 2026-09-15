@@ -148,6 +148,41 @@ Reconciliation is owned server-side. `update_invoice_lines` refuses unless the
 invoice is in draft — so curation always goes reset → edit → post, never a
 silent write to a posted invoice.
 
+## Delivering an order's goods
+
+When a human confirms an order has physically shipped, the `sales` namespace
+marks the goods delivered by validating the outgoing transfer chain. This
+warehouse runs a **3-step route** (Pick → Pack → Out), so `deliver_order`
+walks the whole chain — validating each transfer as its predecessor readies
+it — until the Out is `done`. That flips the order's `delivery_status`, which
+in turn flips `invoice_status` for delivery-based invoicing.
+
+| Method | Writes | What it does |
+|---|---|---|
+| `get_delivery_status` | | Order `delivery_status`/`invoice_status` + every transfer's state (+ any FSM/POD task IDs, for reference) |
+| `deliver_order` | ✓ | Validate the Pick → Pack → Out chain; sets each move's done qty and `picked`, then native `button_validate` |
+
+```bash
+python3 odoo.py call sales.get_delivery_status --args '{"order_id": 1706}'
+python3 odoo.py call sales.deliver_order       --args '{"order_id": 1706}' --confirm
+```
+
+Safety rules baked in:
+- Refuses anything but a confirmed `sale`/`done` order (confirm the quotation
+  first).
+- Validates only fully-**reserved** (`assigned`) transfers. A transfer that
+  can't reserve its stock is returned under `blocked`, never force-shipped.
+- A `button_validate` that returns a wizard (e.g. a backorder prompt) is
+  reported, not clicked through. Quantities are set to full demand, so a
+  backorder prompt should not arise.
+- **Goods only.** It never completes a Field Service / proof-of-delivery task —
+  `get_delivery_status` surfaces those IDs for reference; the FSM job is
+  managed separately.
+
+The return gives `delivery_status`, `invoice_status`, the list of `delivered`
+transfers, and any `blocked` ones with a reason — so the agent can report
+exactly what shipped and what still needs a human.
+
 ## Custom Modules (AndersonTech)
 
 The subcommands above cover core Odoo. The AndersonTech custom modules add
