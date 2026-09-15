@@ -670,19 +670,33 @@ class TestFbMarketplace:
     def test_mark_synced_failure_carries_a_truncated_note(self, fb, mock_client):
         mock_client._models.execute_kw.side_effect = [
             [{"listing_id": 7}], [{"id": 7, "name": "X", "state": "pending"}]]
-        fb.mark_synced(7, ok=False, note="n" * 300)
+        fb.mark_synced(7, "tok1", ok=False, note="n" * 300)
         _, method, args, kw = _calls(mock_client)[0]
         assert (method, args) == ("fb_sync_done", [[7]])
-        assert kw == {"ok": False, "note": "n" * 200}
+        assert kw == {"token": "tok1", "ok": False, "note": "n" * 200}
 
     def test_mark_synced_passes_the_action_and_rejects_unknown_ones(self, fb, mock_client):
         mock_client._models.execute_kw.side_effect = [
             [{"listing_id": 7, "acknowledged": True}], [{"id": 7, "name": "X", "state": "listed"}]]
-        fb.mark_synced(7, action="mark_available")
+        fb.mark_synced(7, "tok1", action="mark_available")
         _, _, _, kw = _calls(mock_client)[0]
-        assert kw == {"ok": True, "action": "mark_available"}
+        assert kw == {"token": "tok1", "ok": True, "action": "mark_available"}
         with pytest.raises(OdooError, match="action must be one of"):
-            fb.mark_synced(7, action="mark_sold")
+            fb.mark_synced(7, "tok1", action="mark_sold")
+        with pytest.raises(OdooError, match="token is required"):
+            fb.mark_synced(7, "")
+
+    def test_string_booleans_are_rejected_not_coerced(self, fb, mock_client):
+        """JSON/CLI callers can send "false": bool("false") is True and would
+        ack a failed sync as done or queue a Facebook action."""
+        for bad in ("false", "true", 0, 1, None):
+            with pytest.raises(OdooError, match="must be true or false"):
+                fb.mark_synced(7, "tok1", ok=bad)
+            with pytest.raises(OdooError, match="must be true or false"):
+                fb.mark_pending(7, sync=bad)
+            with pytest.raises(OdooError, match="must be true or false"):
+                fb.mark_available(7, sync=bad)
+        assert not _calls(mock_client)
 
     def test_pending_counts_as_open_for_duplicate_checks_and_summary(self):
         from odoo_skill.models.fb_marketplace import OPEN_STATES, STATES
@@ -692,9 +706,9 @@ class TestFbMarketplace:
     def test_mark_synced_ok_sends_no_note(self, fb, mock_client):
         mock_client._models.execute_kw.side_effect = [
             [{"listing_id": 7}], [{"id": 7, "name": "X", "state": "pending"}]]
-        fb.mark_synced(7)
+        fb.mark_synced(7, "tok1")
         _, _, _, kw = _calls(mock_client)[0]
-        assert kw == {"ok": True}
+        assert kw == {"token": "tok1", "ok": True}
 
 
 # ── Inbound shipments ────────────────────────────────────────────────

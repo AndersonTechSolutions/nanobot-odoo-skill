@@ -69,7 +69,7 @@ _LIST_FIELDS = [
     *_PACKAGE_FIELDS,
     # fb_marketplace_lister 4.9 pending state: the Facebook-side action the
     # lister still owes (dropped by _existing() on an older module).
-    "fb_sync_action", "fb_sync_error",
+    "fb_sync_action", "fb_sync_error", "fb_sync_token",
 ]
 
 _DETAIL_FIELDS = _LIST_FIELDS + [
@@ -127,6 +127,15 @@ STATES = ["draft", "listed", "renewal_due", "pending", "sold", "ended"]
 #: ``pending`` (module 4.9: buyer lined up) is still open — the post is up and
 #: a second draft for the same product would be a duplicate.
 OPEN_STATES = ["draft", "listed", "renewal_due", "pending"]
+
+
+def _strict_bool(value: Any, name: str) -> bool:
+    """A real boolean only. ``"false"`` (a string from a JSON/CLI caller) is
+    truthy under ``bool()`` and would queue a Facebook action or acknowledge
+    a failed sync as done, so anything but True/False is rejected."""
+    if isinstance(value, bool):
+        return value
+    raise OdooError(f"{name} must be true or false (got {value!r})")
 
 #: ``condition`` values accepted by the module.
 CONDITIONS = ["new", "refurbished", "like_new", "good", "fair", "for_parts"]
@@ -790,26 +799,33 @@ class FbMarketplaceOps(BaseOps):
         as pending". ``sync=False`` is the reconcile write-back for a post
         Facebook already shows as pending - state only, nothing queued.
         """
-        return self.run_action(listing_id, "action_mark_pending", sync=bool(sync))
+        return self.run_action(listing_id, "action_mark_pending",
+                               sync=_strict_bool(sync, "sync"))
 
     def mark_available(self, listing_id: int, sync: bool = True) -> dict:
         """Pending -> listed (the deal fell through). Same ``sync`` contract
         as :meth:`mark_pending`, for Facebook's "Mark as available"."""
-        return self.run_action(listing_id, "action_mark_available", sync=bool(sync))
+        return self.run_action(listing_id, "action_mark_available",
+                               sync=_strict_bool(sync, "sync"))
 
-    def mark_synced(self, listing_id: int, ok: bool = True,
+    def mark_synced(self, listing_id: int, token: str, ok: bool = True,
                     note: Optional[str] = None, action: Optional[str] = None) -> dict:
         """Report the queued Facebook action back (``fb_sync_done``).
 
+        ``token`` is the request id (``fb_sync_token``) the row carried when
+        the browser picked it up (from :meth:`sync_queue` or :meth:`get`).
         ``ok=True`` clears the queue row; ``ok=False`` keeps it queued, stores
         ``note`` as ``fb_sync_error`` and hands the listing's creator a to-do.
         ``note`` is truncated server-side to 200 chars. ``action`` names the
-        request the browser actually performed (one of :data:`SYNC_ACTIONS`);
-        the server ignores the report as stale if the queue has since moved on
-        to a different action (``returned[0]["acknowledged"]`` is False).
-        Always pass it from an automated run.
+        request the browser actually performed (one of :data:`SYNC_ACTIONS`).
+        The server ignores the report as stale — ``returned[0]["acknowledged"]``
+        is False — when the token (or action) no longer matches the queue,
+        i.e. the listing was flipped again while the browser was busy.
         """
-        kwargs: dict[str, Any] = {"ok": bool(ok)}
+        token = str(token or "").strip()
+        if not token:
+            raise OdooError("token is required (the row's fb_sync_token)")
+        kwargs: dict[str, Any] = {"token": token, "ok": _strict_bool(ok, "ok")}
         if note:
             kwargs["note"] = str(note)[:200]
         if action:
