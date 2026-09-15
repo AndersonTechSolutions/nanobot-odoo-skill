@@ -597,6 +597,9 @@ _WRITE_PREFIXES = (
     # void an invoice, and push a corrected invoice to QuickBooks all mutate.
     # (reset_/update_/run_ are already covered above.)
     "reprice_", "void_", "push_",
+    # sale_order.deliver_order validates the outgoing picking chain (ships
+    # goods). get_delivery_status is a read (get_ prefix, not gated).
+    "deliver_",
 )
 
 
