@@ -111,6 +111,43 @@ python3 skills/odoo/odoo.py "check stock for Widget X"
 ```
 
 
+## Invoice curation & QuickBooks reconciliation
+
+The `invoices` namespace (reached through the generic `call` command) covers
+the full customer-invoice lifecycle a bookkeeper works: create, post, query
+unpaid/overdue — plus **curation** (correcting a posted invoice) and
+**reconciliation** against QuickBooks via the `atech_qbo_invoice_autolink`
+module.
+
+| Method | Writes | What it does |
+|---|---|---|
+| `create_invoice` / `post_invoice` | ✓ | Create a draft, then post (validate) it |
+| `get_invoice` / `get_invoice_lines` | | Full record; editable line detail with IDs |
+| `get_unpaid_invoices` / `get_overdue_invoices` | | Open-balance queries |
+| `reset_to_draft` | ✓ | `button_draft` — unlock a posted invoice for editing |
+| `update_invoice_lines` | ✓ | Edit/add/remove lines on a **draft** invoice |
+| `reprice_line` | ✓ | Change one line's unit price (draft only) |
+| `void_invoice` | ✓ | `button_cancel`, reason stored in narration |
+| `push_qbo_update` | ✓ | Push a corrected posted invoice to QuickBooks now |
+| `get_reconciliation_status` | | Odoo balance + QBO mapping/self-heal state |
+| `run_qbo_selfheal` | ✓ | Trigger the hourly Odoo↔QBO payment self-heal sweep now |
+
+**The correct price-change flow** (unpaid, already-posted invoice) — each write
+step needs `--confirm`:
+
+```bash
+python3 odoo.py call invoices.reset_to_draft      --args '{"invoice_id": 42}' --confirm
+python3 odoo.py call invoices.reprice_line        --args '{"invoice_id": 42, "line_id": 118, "price_unit": 600.0}' --confirm
+python3 odoo.py call invoices.post_invoice        --args '{"invoice_id": 42}' --confirm
+# re-posting an already-mapped invoice auto-enqueues the QBO update push;
+# use push_qbo_update only to force it or after a failed job.
+python3 odoo.py call invoices.get_reconciliation_status --args '{"invoice_id": 42}'
+```
+
+Reconciliation is owned server-side. `update_invoice_lines` refuses unless the
+invoice is in draft — so curation always goes reset → edit → post, never a
+silent write to a posted invoice.
+
 ## Custom Modules (AndersonTech)
 
 The subcommands above cover core Odoo. The AndersonTech custom modules add

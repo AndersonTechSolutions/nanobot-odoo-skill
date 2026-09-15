@@ -593,6 +593,10 @@ _WRITE_PREFIXES = (
     # decline/counter_offer answer the buyer (already caught by verbs above
     # except these).
     "pause_", "resume_", "accept_", "decline_", "counter_", "message_",
+    # invoice curation + QBO reconciliation (InvoiceOps): reprice a line,
+    # void an invoice, and push a corrected invoice to QuickBooks all mutate.
+    # (reset_/update_/run_ are already covered above.)
+    "reprice_", "void_", "push_",
 )
 
 
