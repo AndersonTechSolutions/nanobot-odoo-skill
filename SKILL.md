@@ -183,6 +183,43 @@ The return gives `delivery_status`, `invoice_status`, the list of `delivered`
 transfers, and any `blocked` ones with a reason — so the agent can report
 exactly what shipped and what still needs a human.
 
+## Recycling: send to the workbench, then write off
+
+AndersonTech recycles stock in **two steps**, on the `inventory` namespace:
+
+1. **`send_to_recycling`** — an internal transfer of the item out of its bin
+   into the **Recycling_Workbench** staging location. The stock is still on
+   hand, now parked at the workbench for dismantle/weigh.
+2. **`complete_recycling`** — a `stock.scrap` out of the workbench to the
+   Virtual/Scrap location. That is the **write-off**: the item leaves
+   inventory. Mirrors how the warehouse already scraps, with the workbench as
+   the visible staging step in between.
+
+| Method | Writes | What it does |
+|---|---|---|
+| `recycling_contents` | | List what is staged in the workbench (product, qty, lot) |
+| `send_to_recycling` | ✓ | Internal transfer `bin → Recycling_Workbench` for `quantity` units |
+| `complete_recycling` | ✓ | Scrap `Recycling_Workbench → Virtual/Scrap` (removes from inventory) |
+
+```bash
+python3 odoo.py call inventory.recycling_contents
+python3 odoo.py call inventory.send_to_recycling  --args '{"product_id": 13979, "quantity": 1}' --confirm
+python3 odoo.py call inventory.complete_recycling --args '{"product_id": 13979}' --confirm   # qty defaults to all staged
+```
+
+Safety rules baked in:
+- **Never guesses the bin.** If the product sits in more than one internal
+  location and no `source_location_id` is given, `send_to_recycling` returns
+  `{needs_source, candidates}` and writes nothing — pass one of the candidate
+  `location_id`s.
+- `send_to_recycling` only validates a fully-**reserved** transfer; if the bin
+  can't cover the quantity it reports `blocked`, never force-ships.
+- `complete_recycling` scraps **only what is staged in the workbench**. Nothing
+  staged → it raises (it will not reach back into a sale bin); asking for more
+  than is staged → it raises.
+- Both need `--confirm`. Locations are resolved by name/flag at runtime
+  (Recycling_Workbench; the usage-`inventory` scrap location), not hardcoded.
+
 ## Custom Modules (AndersonTech)
 
 The subcommands above cover core Odoo. The AndersonTech custom modules add
