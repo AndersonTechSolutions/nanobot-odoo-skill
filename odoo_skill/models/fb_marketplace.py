@@ -84,6 +84,10 @@ _DETAIL_FIELDS = _LIST_FIELDS + [
     # credit-card footer) is what goes on Facebook. Dropped by _existing()
     # on an older module, so posters fall back to ``description``.
     "description_full", "description_footer", "accept_cards",
+    # fb_marketplace_lister 4.13: the Facebook category picked in Odoo. Dropped
+    # by _existing() on an older module, so posters fall back to the keyword
+    # proposal in the lister skill.
+    "category_id",
 ]
 
 #: ``product.template`` model the package RPCs live on; the listing's own
