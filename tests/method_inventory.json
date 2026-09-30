@@ -195,6 +195,7 @@
   "sales.confirm_order",
   "sales.create_quotation",
   "sales.deliver_order",
+  "sales.set_ltl_freight",
   "smart.find_or_create_partner",
   "smart.find_or_create_product",
   "smart.learn_location",

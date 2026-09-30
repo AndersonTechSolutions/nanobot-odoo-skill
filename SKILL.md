@@ -148,6 +148,36 @@ Reconciliation is owned server-side. `update_invoice_lines` refuses unless the
 invoice is in draft — so curation always goes reset → edit → post, never a
 silent write to a posted invoice.
 
+## LTL (pallet) freight on a quotation
+
+When a quote ships LTL (palletized freight), **never add or price the FRT-LTL
+line yourself.** The `atech_ltl_freight` module owns it: give it the pallet
+count and the carrier's rate, and it creates exactly one freight line at
+`carrier cost + pallets × palletization rate` ($50/pallet, Sales settings).
+The palletization is baked into that line — the customer never sees it as a
+fee. Don't mention palletization to customers.
+
+| Method | Writes | What it does |
+|---|---|---|
+| `set_ltl_freight` | ✓ | `order_id`, `pallets` (> 0), `carrier_cost` → server builds/updates the FRT-LTL line; returns `{pallets, rate, palletization, carrier_cost, freight_price, line_id}` |
+
+```bash
+python3 odoo.py call sales.set_ltl_freight --args '{"order_id": 1754, "pallets": 2, "carrier_cost": 885.65}' --confirm
+```
+
+Rules the server enforces (don't fight them — report them):
+- One freight line only, qty 1, no discount, price = formula. Hand edits,
+  discounts, a second freight line, deleting it, or unticking LTL are refused
+  for non-managers.
+- An LTL order can't be confirmed with 0 pallets.
+- Only Sales managers can change the per-order rate; don't try.
+- After confirmation the freight is frozen (managers can amend).
+- A posted invoice that bills FRT-LTL can only be reset/cancelled/credited by
+  a Sales manager or accounting admin.
+
+If the carrier rate isn't known yet, ask the human for it (or for pallets) —
+don't guess a freight number.
+
 ## Delivering an order's goods
 
 When a human confirms an order has physically shipped, the `sales` namespace

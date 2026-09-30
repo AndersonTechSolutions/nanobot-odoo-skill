@@ -129,6 +129,39 @@ class SaleOrderOps:
         logger.info("Cancelled order id=%d", order_id)
         return self.get_order(order_id)
 
+    # ── LTL freight ──────────────────────────────────────────────────
+
+    def set_ltl_freight(
+        self, order_id: int, pallets: int, carrier_cost: float
+    ) -> dict:
+        """Price LTL (pallet) freight on a quotation via ``atech_ltl_freight``.
+
+        Never hand-price the FRT-LTL line: the server sets exactly one
+        freight line at ``carrier_cost + pallets x palletization rate``
+        ($50/pallet default, Sales settings). The palletization is baked
+        into that one line and never shown to the customer.
+
+        Args:
+            order_id: The sale order ID (draft/sent quotation).
+            pallets: Number of pallets (must be > 0 to confirm the order).
+            carrier_cost: What the carrier/broker charges us, in the order
+                currency.
+
+        Returns:
+            ``{pallets, rate, palletization, carrier_cost, freight_price,
+            line_id}`` from the server.
+        """
+        if int(pallets) <= 0:
+            raise ValueError("pallets must be > 0 for an LTL shipment")
+        if float(carrier_cost) < 0:
+            raise ValueError("carrier_cost can't be negative")
+        result = self.client.execute(
+            self.MODEL, "action_set_ltl_freight",
+            [order_id], int(pallets), float(carrier_cost),
+        )
+        logger.info("LTL freight set on order id=%d: %s", order_id, result)
+        return result
+
     # ── Delivery ─────────────────────────────────────────────────────
 
     #: Picking states that still need action to complete a delivery.
