@@ -828,7 +828,7 @@ class FbMarketplaceOps(BaseOps):
         "partner", "amount", "label_mode", "delivery", "delivery_state",
         "tracking", "invoices", "invoice_paid", "street_known", "fund_status",
         "actions", "attachment_id", "label_attachment_id", "print_queued",
-        "printer", "carrier",
+        "printer", "carrier", "print_error",
     )
 
     @staticmethod
