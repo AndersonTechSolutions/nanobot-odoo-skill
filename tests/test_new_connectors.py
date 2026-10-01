@@ -220,6 +220,142 @@ class TestFbMarketplace:
         assert "listing closed" in out["summary"]
         assert "action_mark_sold" not in [c[1] for c in _calls(mock_client)]
 
+    # ── Facebook checkout orders (module 4.16) ───────────────────────
+
+    def test_import_order_sends_only_known_keys(self, fb, mock_client):
+        res = {"success": True, "duplicate": False, "sale_order": "S01800",
+               "partner": "Sam K", "amount": 12.0, "delivery": "WH/OUT/1",
+               "invoices": ["INV/1"]}
+        mock_client._models.execute_kw.side_effect = [res, [{"id": 10, "name": "G430"}]]
+        out = fb.import_order(10, {
+            "fb_order_id": " 1064906909484303 ", "qty": 1, "unit_price": 12.0,
+            "label_mode": "fb", "buyer_name": "Sam K", "evil": "x",
+            "ship_to": {"city": "Grand Rapids", "zip": "49534", "bad": 1}})
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "fb_import_order", [[10]])
+        assert kw["order"]["fb_order_id"] == "1064906909484303"
+        assert "evil" not in kw["order"]
+        assert kw["order"]["ship_to"] == {"city": "Grand Rapids", "zip": "49534"}
+        assert "S01800" in out["summary"]
+
+    def test_order_number_must_be_digits(self, fb, mock_client):
+        for bad in ("", "12ab", "1" * 25, None):
+            with pytest.raises(OdooError):
+                fb.update_order(bad, tracking="1Z")
+        assert not _calls(mock_client)
+
+    def test_update_order_is_model_level(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [{"success": True, "actions": []}]
+        fb.update_order("1064906909484303", tracking="9400", carrier="USPS",
+                        fund_status="Paid", payout_id="14388")
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method) == ("fb.marketplace.sale", "fb_order_sync")
+        assert args == ["1064906909484303", {"tracking": "9400", "carrier": "USPS",
+                                             "fund_status": "paid", "payout_id": "14388"}]
+        with pytest.raises(OdooError):
+            fb.update_order("1064906909484303", fund_status="refunded")
+
+    def test_attach_label_reads_a_pdf_file_only(self, fb, mock_client, tmp_path, monkeypatch):
+        labels = tmp_path / "labels"
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(labels))
+        labels.mkdir()
+        pdf = labels / "label.pdf"
+        pdf.write_bytes(b"%PDF-1.4 label")
+        mock_client._models.execute_kw.side_effect = [{"success": True, "big": "x" * 999}]
+        out = fb.attach_label("1064906909484303", str(pdf), tracking="9400")
+        _, method, args, kw = _calls(mock_client)[0]
+        assert method == "fb_attach_label"
+        assert args[1] == "JVBERi0xLjQgbGFiZWw="
+        assert kw == {"tracking": "9400"}
+        assert "big" not in out, "only allowlisted result keys reach the agent"
+        outside = tmp_path / "other.pdf"
+        outside.write_bytes(b"%PDF-1.4 secret")
+        txt = labels / "secret.txt"
+        txt.write_text("not a pdf")
+        link = labels / "link.pdf"
+        link.symlink_to(outside)
+        big = labels / "big.pdf"
+        big.write_bytes(b"%PDF-" + b"0" * (5 * 1024 * 1024))
+        for bad in (outside, txt, link, big, labels / ".." / "other.pdf"):
+            with pytest.raises(OdooError):
+                fb.attach_label("1064906909484303", str(bad))
+        assert len(_calls(mock_client)) == 1
+
+    def test_label_dir_must_not_be_a_link(self, fb, tmp_path, monkeypatch):
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "linked").symlink_to(real)
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(tmp_path / "linked"))
+        with pytest.raises(OdooError):
+            fb._label_dir()
+
+    def test_make_own_label_saves_pdf_instead_of_returning_it(self, fb, mock_client, tmp_path, monkeypatch):
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(tmp_path))
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "tracking": "1Z", "pdf_b64": "JVBERi0xLjQ="},
+            {"success": True, "tracking": "1Z", "pdf_b64": "!!notb64"}]
+        out = fb.make_own_label("892986822645789")
+        assert "pdf_b64" not in out
+        assert open(out["label_path"], "rb").read() == b"%PDF-1.4"
+        assert oct(os.stat(out["label_path"]).st_mode & 0o777) == "0o600"
+        bad = fb.make_own_label("892986822645789")
+        assert bad["label_path"] == "" and "do NOT buy again" in bad["save_error"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == [os.path.basename(out["label_path"])], \
+            "a failed save leaves no reserved file behind"
+
+    def test_make_own_label_never_retries_the_purchase(self, fb, mock_client, tmp_path, monkeypatch):
+        import xmlrpc.client
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(tmp_path))
+        mock_client._models.execute_kw.side_effect = ConnectionResetError("lost reply")
+        with pytest.raises(OdooError, match="UNKNOWN"):
+            fb.make_own_label("892986822645789")
+        assert len(_calls(mock_client)) == 1, "postage must never be bought twice"
+        assert not list(tmp_path.iterdir())
+        import http.client
+        for err in (xmlrpc.client.ProtocolError("h", 504, "Gateway Timeout", {}),
+                    http.client.IncompleteRead(b""), xmlrpc.client.ResponseError("bad xml")):
+            mock_client._models.execute_kw.side_effect = err
+            with pytest.raises(OdooError, match="UNKNOWN"):
+                fb.make_own_label("892986822645789")
+        assert not list(tmp_path.iterdir())
+        mock_client._models.execute_kw.side_effect = [{"success": True, "tracking": "1Z"}]
+        out = fb.make_own_label("892986822645789")
+        assert "no label PDF" in out["save_error"]
+
+    def test_update_order_rejects_non_text_identifiers(self, fb, mock_client):
+        for kw in ({"tracking": True}, {"tracking": "  "}, {"tracking": "1" * 65},
+                   {"fund_status": "paid", "payout_id": {"a": 1}}):
+            with pytest.raises(OdooError):
+                fb.update_order("1064906909484303", **kw)
+        assert not _calls(mock_client)
+
+    def test_import_order_validates_locally(self, fb, mock_client):
+        good = {"fb_order_id": "1064906909484303", "unit_price": 12.0, "label_mode": "fb"}
+        for listing_id in (True, 0, -1, 1.5, "x"):
+            with pytest.raises(OdooError):
+                fb.import_order(listing_id, good)
+        for bad in ({"unit_price": True}, {"unit_price": float("nan")}, {"label_mode": "?"},
+                    {"qty": -1}):
+            with pytest.raises(OdooError):
+                fb.import_order(10, {**good, **bad})
+        with pytest.raises(OdooError):
+            fb.import_order(10, {"fb_order_id": "1064906909484303", "label_mode": "fb"})
+        with pytest.raises(OdooError):
+            fb.update_order("1064906909484303", carrier="USPS")
+        with pytest.raises(OdooError):
+            fb.update_order("1064906909484303", payout_id="1")
+        assert not _calls(mock_client)
+
+    def test_orders_status_is_a_read(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [{"success": True, "orders": [
+            {"fb_order_id": "1064906909484303", "imported": False}]}]
+        out = fb.orders_status(["1064906909484303"])
+        assert out["orders"] == [{"fb_order_id": "1064906909484303", "imported": False}]
+        model, method, args, _ = _calls(mock_client)[0]
+        assert (model, method, args) == ("fb.marketplace.sale", "fb_orders_status",
+                                         [["1064906909484303"]])
+        assert fb.orders_status([]) == {"success": True, "orders": []}
+
     def test_mark_sold_closed_reports_temp_product_archived(self, fb, mock_client):
         """A closed sale on a temp item archives its product server-side; the
         reply must say so (read by id so the archived row still comes back)."""
@@ -1192,3 +1328,29 @@ class TestFieldFiltering:
         fb.search([], fields=["id", "name", "definitely_not_a_field"])
         _, _, _, odoo_kwargs = _calls(mock_client)[0]
         assert "definitely_not_a_field" in odoo_kwargs["fields"]
+
+
+def test_models_transport_never_resends(monkeypatch):
+    """The stdlib transport re-sends once on a reset connection; the client's
+    one-shot transport must not (a resent purchase buys postage twice)."""
+    from odoo_skill import client as client_mod
+    calls = []
+
+    def single(self, host, handler, body, verbose=False):
+        calls.append(1)
+        raise ConnectionResetError("reset")
+
+    monkeypatch.setattr(client_mod._OneShotTransport, "single_request", single)
+    with pytest.raises(ConnectionResetError):
+        client_mod._OneShotTransport().request("h", "/x", b"<x/>")
+    assert calls == [1]
+
+
+@pytest.mark.parametrize("url,kind", [("https://odoo.example", "_OneShotSafeTransport"),
+                                      ("http://odoo.example", "_OneShotTransport")])
+def test_models_proxy_uses_one_shot_transport(url, kind):
+    from odoo_skill import client as client_mod
+    c = client_mod.OdooClient.__new__(client_mod.OdooClient)
+    c._models = None
+    c.config = type("Cfg", (), {"url": url})()
+    assert type(c.models._ServerProxy__transport).__name__ == kind

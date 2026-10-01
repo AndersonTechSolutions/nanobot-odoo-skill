@@ -37,11 +37,17 @@ Four things shape this class:
   those filters run server-side.
 """
 
+import base64
+import binascii
 import html
 import logging
+import math
+import os
+import stat
 import re
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 from ..errors import (
@@ -190,6 +196,8 @@ class FbMarketplaceOps(BaseOps):
         "action_mark_pending",
         "action_mark_available",
         "fb_sync_done",
+        # checkout orders (4.16): import a Facebook order onto this listing
+        "fb_import_order",
     })
 
     #: Facebook-side actions ``sync_queue`` can carry (module 4.9).
@@ -799,6 +807,303 @@ class FbMarketplaceOps(BaseOps):
             "result": out,
             "listing": result["record"],
         }
+
+    # ── Facebook checkout orders (fb_marketplace_lister 4.16) ────────
+    #
+    # A checkout order is one the buyer paid for on Facebook and we ship.
+    # The browser half reads Marketplace > Orders; these calls carry what it
+    # saw. All of them need the "Record Sales" group server-side, and the
+    # server re-validates every field (digits-only order number, finite
+    # money, fb|own label mode).
+
+    _SALE_MODEL = "fb.marketplace.sale"
+    _ORDER_KEYS = ("fb_order_id", "qty", "unit_price", "label_mode",
+                   "buyer_shipping", "buyer_name", "ship_to", "ship_by")
+    _SHIP_TO_KEYS = ("street", "street2", "city", "state", "zip")
+    _MAX_LABEL_BYTES = 5 * 1024 * 1024
+    #: Keys of a module order result that reach the agent (no blobs).
+    _RESULT_KEYS = (
+        "success", "duplicate", "imported", "accessible", "fb_order_id",
+        "sale_id", "listing_id", "listing_state", "sale_order_id", "sale_order",
+        "partner", "amount", "label_mode", "delivery", "delivery_state",
+        "tracking", "invoices", "invoice_paid", "street_known", "fund_status",
+        "actions", "attachment_id", "label_attachment_id", "print_queued",
+        "printer", "carrier",
+    )
+
+    @staticmethod
+    def _order_no(value: Any) -> str:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"\d{6,20}", text):
+            raise OdooError("fb_order_id must be the 6-20 digit Facebook order number")
+        return text
+
+    @classmethod
+    def _order_view(cls, out: Any) -> dict:
+        """Allowlisted, size-bounded view of a module order result."""
+        if not isinstance(out, dict):
+            raise OdooError(f"unexpected server reply ({type(out).__name__})")
+        view = {}
+        for key in cls._RESULT_KEYS:
+            if key not in out:
+                continue
+            value = out[key]
+            if isinstance(value, str):
+                value = value[:200]
+            elif isinstance(value, list):
+                value = [str(v)[:64] for v in value[:20]]
+            elif not isinstance(value, (bool, int, float)) and value is not None:
+                value = str(value)[:200]
+            view[key] = value
+        return view
+
+    def _ship_to(self, value: Any) -> dict:
+        if not value:
+            return {}
+        if not isinstance(value, dict):
+            raise OdooError("ship_to must be an object")
+        return {k: str(value[k])[:128] for k in self._SHIP_TO_KEYS if value.get(k)}
+
+    @staticmethod
+    def _label_dir() -> Path:
+        """The one directory label PDFs are read from / written to:
+        ``FB_LISTER_LABEL_DIR``, else ``$FB_LISTER_EXPORT_DIR/orders/labels``."""
+        raw = os.environ.get("FB_LISTER_LABEL_DIR") or os.path.join(
+            os.environ.get("FB_LISTER_EXPORT_DIR") or "", "orders", "labels")
+        if not os.path.isabs(raw):
+            raise OdooError("set FB_LISTER_LABEL_DIR (or FB_LISTER_EXPORT_DIR) to an absolute path")
+        path = Path(raw)
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        real = Path(os.path.realpath(path))
+        if real != path.absolute() or not real.is_dir():
+            raise OdooError(f"label dir must be a real directory, not a link: {raw}")
+        return real
+
+    def _open_label_dir(self) -> tuple[Path, int]:
+        """Open :meth:`_label_dir` by walking it component by component from
+        ``/`` with no-follow, descriptor-relative opens, then do every file
+        operation relative to the final descriptor (``dir_fd``): no link in
+        the path, now or swapped in later, can redirect the open."""
+        root = self._label_dir()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        dfd = os.open("/", flags)
+        try:
+            for part in root.parts[1:]:
+                nxt = os.open(part, flags, dir_fd=dfd)
+                os.close(dfd)
+                dfd = nxt
+        except OSError as exc:
+            os.close(dfd)
+            raise OdooError(f"cannot open label dir {root}: {exc.strerror}") from None
+        return root, dfd
+
+    def _read_label(self, pdf_path: str) -> bytes:
+        """Open a label directly inside :meth:`_label_dir` without following
+        links and read at most the size cap from the opened descriptor."""
+        root, dfd = self._open_label_dir()
+        try:
+            name = os.path.basename(pdf_path)
+            if os.path.abspath(pdf_path) != str(root / name) or name in ("", ".", ".."):
+                raise OdooError(f"label must be a file directly inside {root}")
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+            except OSError as exc:
+                raise OdooError(f"cannot open label: {exc.strerror}") from None
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    raise OdooError("label is not a regular file")
+                blob = fh.read(self._MAX_LABEL_BYTES + 1)
+        finally:
+            os.close(dfd)
+        if not blob.startswith(b"%PDF-") or len(blob) > self._MAX_LABEL_BYTES:
+            raise OdooError("the label must be a PDF of at most 5 MB")
+        return blob
+
+    @staticmethod
+    def _ident(value: Any, name: str, limit: int) -> str:
+        """A short free-text identifier (tracking, carrier, payout id)."""
+        if not isinstance(value, str) or not value.strip():
+            raise OdooError(f"{name} must be non-empty text")
+        value = value.strip()
+        if len(value) > limit:
+            raise OdooError(f"{name} is longer than {limit} characters")
+        return value
+
+    @staticmethod
+    def _positive_id(value: Any, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise OdooError(f"{name} must be a positive integer")
+        text = str(value).strip()
+        if not text.isdigit() or int(text) <= 0:
+            raise OdooError(f"{name} must be a positive integer")
+        return int(text)
+
+    def orders_status(self, fb_order_ids: list) -> dict:
+        """Read-only: where each Facebook order stands in Odoo (imported?,
+        sales order, delivery state, tracking, invoice paid?)."""
+        self._require()
+        ids = [self._order_no(i) for i in (fb_order_ids or [])]
+        if len(ids) > 500:
+            raise OdooError("at most 500 order ids per call")
+        if not ids:
+            return {"success": True, "orders": []}
+        out = self.client.execute(self._SALE_MODEL, "fb_orders_status", ids)
+        rows = out.get("orders") if isinstance(out, dict) else None
+        if not isinstance(rows, list):
+            raise OdooError("unexpected server reply")
+        return {"success": True, "orders": [self._order_view(r) for r in rows]}
+
+    def import_order(self, listing_id: int, order: dict) -> dict:
+        """Import one Facebook checkout order onto a listing
+        (``fb_import_order``): buyer contact, untaxed sales order, delivery
+        left open, invoice posted and unpaid until Facebook pays out.
+        Importing the same order again returns ``duplicate: True``."""
+        listing_id = self._positive_id(listing_id, "listing_id")
+        if not isinstance(order, dict):
+            raise OdooError("order must be an object")
+        payload = {k: order[k] for k in self._ORDER_KEYS if k in order}
+        payload["fb_order_id"] = self._order_no(order.get("fb_order_id"))
+        if payload.get("label_mode") not in ("fb", "own"):
+            raise OdooError('label_mode must be "fb" or "own"')
+        for key in ("qty", "unit_price", "buyer_shipping"):
+            if key in payload:
+                value = payload[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                        or not math.isfinite(value) or value < 0:
+                    raise OdooError(f"{key} must be a finite number of 0 or more")
+        if "unit_price" not in payload:
+            raise OdooError("unit_price is required")
+        if "ship_to" in payload:
+            payload["ship_to"] = self._ship_to(payload["ship_to"])
+        result = self.run_action(listing_id, "fb_import_order", order=payload)
+        out = self._order_view(result["returned"])
+        if out.get("duplicate"):
+            summary = (f"Facebook order {payload['fb_order_id']} was already imported "
+                       f"({out.get('sale_order') or '?'}); nothing changed.")
+        else:
+            summary = (f"Facebook order {payload['fb_order_id']} imported as "
+                       f"{out.get('sale_order')} for {out.get('partner')}: "
+                       f"{out.get('amount')}, delivery {out.get('delivery')} open, "
+                       f"invoice {', '.join(out.get('invoices') or []) or 'on shipping'} unpaid")
+        return {"summary": summary, "order": out, "listing": result["record"]}
+
+    def update_order(self, fb_order_id: str, ship_to: Optional[dict] = None,
+                     tracking: Optional[str] = None, carrier: Optional[str] = None,
+                     fund_status: Optional[str] = None,
+                     payout_id: Optional[str] = None) -> dict:
+        """Bring an imported order in step with Facebook (``fb_order_sync``):
+        fill a blank street, write tracking + validate the open delivery,
+        register the payment once Facebook shows the payout as Paid. Each
+        step runs once; repeating it changes nothing."""
+        self._require()
+        if carrier is not None and tracking is None:
+            raise OdooError("carrier needs tracking")
+        if payout_id is not None and fund_status is None:
+            raise OdooError("payout_id needs fund_status")
+        update: dict[str, Any] = {}
+        if ship_to:
+            update["ship_to"] = self._ship_to(ship_to)
+        if tracking is not None:
+            update["tracking"] = self._ident(tracking, "tracking", 64)
+            if carrier is not None:
+                update["carrier"] = self._ident(carrier, "carrier", 32)
+        if fund_status is not None:
+            fund = self._ident(fund_status, "fund_status", 16).lower()
+            if fund not in ("pending", "paid"):
+                raise OdooError("fund_status must be pending or paid")
+            update["fund_status"] = fund
+            if payout_id is not None:
+                update["payout_id"] = self._ident(payout_id, "payout_id", 32)
+        if not update:
+            raise OdooError("nothing to update")
+        return self._order_view(self.client.execute(
+            self._SALE_MODEL, "fb_order_sync", self._order_no(fb_order_id), update))
+
+    def attach_label(self, fb_order_id: str, pdf_path: str,
+                     tracking: Optional[str] = None,
+                     carrier: Optional[str] = None) -> dict:
+        """Attach a Facebook-made label PDF to the order's open delivery,
+        queue it on the configured label printer and write the tracking
+        (``fb_attach_label``). The file must sit directly in
+        :meth:`_label_dir`; the PDF never passes through the agent."""
+        self._require()
+        order_no = self._order_no(fb_order_id)
+        blob = self._read_label(pdf_path)
+        kwargs: dict[str, Any] = {}
+        if tracking is not None:
+            kwargs["tracking"] = self._ident(tracking, "tracking", 64)
+        if carrier is not None:
+            kwargs["carrier"] = self._ident(carrier, "carrier", 32)
+        return self._order_view(self.client.execute(
+            self._SALE_MODEL, "fb_attach_label", order_no,
+            base64.b64encode(blob).decode("ascii"), **kwargs))
+
+    @staticmethod
+    def _discard(fh: Any, name: str, dfd: int) -> None:
+        """Best-effort removal of a reserved label file; never raises (a
+        cleanup error must not hide what happened to the purchase)."""
+        try:
+            fh.close()
+        except OSError:
+            pass
+        try:
+            os.unlink(name, dir_fd=dfd)
+        except OSError:
+            pass
+
+    def make_own_label(self, fb_order_id: str) -> dict:
+        """Own-label order: buy the label through the configured carrier on
+        the open delivery and print it (``fb_make_own_label``). BUYS POSTAGE,
+        so the call is never retried automatically. The label PDF goes to a
+        file reserved in :meth:`_label_dir` BEFORE the purchase (for the
+        Facebook upload), never inline. Anything that goes wrong after the
+        purchase comes back as ``save_error``: the postage is bought, do not
+        buy again; reprint from the Odoo delivery."""
+        self._require()
+        order_no = self._order_no(fb_order_id)
+        root, dfd = self._open_label_dir()
+        name = f"own_label_{order_no}_{uuid.uuid4().hex[:8]}.pdf"
+        try:
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=dfd)
+            except OSError as exc:
+                raise OdooError(f"cannot reserve the label file: {exc.strerror}") from None
+            fh = os.fdopen(fd, "wb")
+            try:
+                raw = self.client.execute_once(self._SALE_MODEL, "fb_make_own_label", order_no)
+            except Exception as exc:  # noqa: BLE001 - any failure: outcome unknown
+                # Whatever broke (server fault after the carrier call, gateway
+                # 504, truncated or unparsable reply), the carrier may already
+                # have sold the label: never present it as a clean failure.
+                self._discard(fh, name, dfd)
+                raise OdooError(
+                    f"label purchase outcome UNKNOWN ({type(exc).__name__}: {exc}): "
+                    "the postage may have been bought. Check the Odoo delivery's "
+                    "tracking before buying again.") from None
+            out = self._order_view(raw) if isinstance(raw, dict) else {}
+            out["label_path"] = ""
+            try:
+                if not isinstance(raw, dict):
+                    raise ValueError("unexpected server reply")
+                b64 = raw.get("pdf_b64") or ""
+                if not b64:
+                    raise ValueError("the carrier returned no label PDF")
+                if not isinstance(b64, str) or len(b64) > self._MAX_LABEL_BYTES * 2:
+                    raise ValueError("label too large")
+                blob = base64.b64decode(b64, validate=True)
+                if not blob.startswith(b"%PDF-") or len(blob) > self._MAX_LABEL_BYTES:
+                    raise ValueError("not a PDF")
+                fh.write(blob)
+                fh.close()
+                out["label_path"] = str(root / name)
+            except (ValueError, OSError, binascii.Error) as exc:
+                out["save_error"] = (f"label bought but not saved locally ({exc}); "
+                                     "do NOT buy again: check / reprint from the Odoo delivery")
+                self._discard(fh, name, dfd)
+            return out
+        finally:
+            os.close(dfd)
 
     def mark_renewed(self, listing_id: int) -> dict:
         """Record that the listing was renewed on Facebook, resetting the clock."""

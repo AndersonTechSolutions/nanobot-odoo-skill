@@ -600,6 +600,9 @@ _WRITE_PREFIXES = (
     # sale_order.deliver_order validates the outgoing picking chain (ships
     # goods). get_delivery_status is a read (get_ prefix, not gated).
     "deliver_",
+    # fb_marketplace checkout orders: import_order books a sale order +
+    # invoice; attach_label prints; make_own_label BUYS postage.
+    "import_", "attach_", "make_",
 )
 
 

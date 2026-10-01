@@ -34,6 +34,21 @@ def _is_null_marshal_fault(exc: xmlrpc.client.Fault) -> bool:
     return _NULL_MARSHAL_SIGNATURE in str(getattr(exc, "faultString", "") or "")
 
 
+class _OneShotMixin:
+    """``Transport.request`` minus its built-in single resend."""
+
+    def request(self, host, handler, request_body, verbose=False):
+        return self.single_request(host, handler, request_body, verbose)
+
+
+class _OneShotTransport(_OneShotMixin, xmlrpc.client.Transport):
+    pass
+
+
+class _OneShotSafeTransport(_OneShotMixin, xmlrpc.client.SafeTransport):
+    pass
+
+
 class OdooClient:
     """Thread-safe Odoo XML-RPC client.
 
@@ -106,12 +121,18 @@ class OdooClient:
 
     @property
     def models(self) -> xmlrpc.client.ServerProxy:
-        """``/xmlrpc/2/object`` endpoint (lazy, cached)."""
+        """``/xmlrpc/2/object`` endpoint (lazy, cached).
+
+        Uses a one-shot transport: the stdlib transport silently re-sends a
+        request once on a reset/stale connection, which would run a
+        non-idempotent call twice. Retrying belongs to
+        :func:`retry_on_connection_error` alone, which :meth:`execute_once`
+        can skip."""
         if self._models is None:
-            self._models = xmlrpc.client.ServerProxy(
-                f"{self.config.url}/xmlrpc/2/object",
-                allow_none=True,
-            )
+            url = f"{self.config.url}/xmlrpc/2/object"
+            once = (_OneShotSafeTransport() if url.startswith("https:")
+                    else _OneShotTransport())
+            self._models = xmlrpc.client.ServerProxy(url, transport=once, allow_none=True)
         return self._models
 
     @property
@@ -218,6 +239,12 @@ class OdooClient:
                 )
                 return None
             raise classify_error(exc, model=model, method=method) from exc
+
+    def execute_once(self, model: str, method: str, *args: Any, **kwargs: Any) -> Any:
+        """:meth:`execute` WITHOUT the connection-error retry, for calls that
+        must never run twice (e.g. buying postage): a lost reply surfaces as
+        an error instead of silently repeating the call."""
+        return type(self).execute.__wrapped__(self, model, method, *args, **kwargs)
 
     # ── Convenience wrappers ─────────────────────────────────────────
 
