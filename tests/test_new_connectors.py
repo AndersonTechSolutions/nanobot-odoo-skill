@@ -220,6 +220,75 @@ class TestFbMarketplace:
         assert "listing closed" in out["summary"]
         assert "action_mark_sold" not in [c[1] for c in _calls(mock_client)]
 
+    # ── Facebook checkout orders (module 4.16) ───────────────────────
+
+    def test_import_order_sends_only_known_keys(self, fb, mock_client):
+        res = {"success": True, "duplicate": False, "sale_order": "S01800",
+               "partner": "Sam K", "amount": 12.0, "delivery": "WH/OUT/1",
+               "invoices": ["INV/1"]}
+        mock_client._models.execute_kw.side_effect = [res, [{"id": 10, "name": "G430"}]]
+        out = fb.import_order(10, {
+            "fb_order_id": " 1064906909484303 ", "qty": 1, "unit_price": 12.0,
+            "label_mode": "fb", "buyer_name": "Sam K", "evil": "x",
+            "ship_to": {"city": "Grand Rapids", "zip": "49534", "bad": 1}})
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method, args) == (fb.MODEL, "fb_import_order", [[10]])
+        assert kw["order"]["fb_order_id"] == "1064906909484303"
+        assert "evil" not in kw["order"]
+        assert kw["order"]["ship_to"] == {"city": "Grand Rapids", "zip": "49534"}
+        assert "S01800" in out["summary"]
+
+    def test_order_number_must_be_digits(self, fb, mock_client):
+        for bad in ("", "12ab", "1" * 25, None):
+            with pytest.raises(OdooError):
+                fb.update_order(bad, tracking="1Z")
+        assert not _calls(mock_client)
+
+    def test_update_order_is_model_level(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [{"success": True, "actions": []}]
+        fb.update_order("1064906909484303", tracking="9400", carrier="USPS",
+                        fund_status="Paid", payout_id="14388")
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method) == ("fb.marketplace.sale", "fb_order_sync")
+        assert args == ["1064906909484303", {"tracking": "9400", "carrier": "USPS",
+                                             "fund_status": "paid", "payout_id": "14388"}]
+        with pytest.raises(OdooError):
+            fb.update_order("1064906909484303", fund_status="refunded")
+
+    def test_attach_label_reads_a_pdf_file_only(self, fb, mock_client, tmp_path):
+        pdf = tmp_path / "label.pdf"
+        pdf.write_bytes(b"%PDF-1.4 label")
+        mock_client._models.execute_kw.side_effect = [{"success": True}]
+        fb.attach_label("1064906909484303", str(pdf), tracking="9400")
+        _, method, args, kw = _calls(mock_client)[0]
+        assert method == "fb_attach_label"
+        assert args[1] == "JVBERi0xLjQgbGFiZWw="
+        assert kw == {"tracking": "9400"}
+        txt = tmp_path / "secret.txt"
+        txt.write_text("not a pdf")
+        with pytest.raises(OdooError):
+            fb.attach_label("1064906909484303", str(txt))
+        link = tmp_path / "link.pdf"
+        link.symlink_to(pdf)
+        with pytest.raises(OdooError):
+            fb.attach_label("1064906909484303", str(link))
+
+    def test_make_own_label_saves_pdf_instead_of_returning_it(self, fb, mock_client, tmp_path):
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "tracking": "1Z", "pdf_b64": "JVBERi0xLjQ="}]
+        out = fb.make_own_label("892986822645789", save_dir=str(tmp_path))
+        assert "pdf_b64" not in out
+        assert open(out["label_path"], "rb").read() == b"%PDF-1.4"
+        assert oct(os.stat(out["label_path"]).st_mode & 0o777) == "0o600"
+
+    def test_orders_status_is_a_read(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [{"success": True, "orders": []}]
+        fb.orders_status(["1064906909484303"])
+        model, method, args, _ = _calls(mock_client)[0]
+        assert (model, method, args) == ("fb.marketplace.sale", "fb_orders_status",
+                                         [["1064906909484303"]])
+        assert fb.orders_status([]) == {"success": True, "orders": []}
+
     def test_mark_sold_closed_reports_temp_product_archived(self, fb, mock_client):
         """A closed sale on a temp item archives its product server-side; the
         reply must say so (read by id so the archived row still comes back)."""
