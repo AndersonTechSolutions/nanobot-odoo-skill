@@ -299,7 +299,28 @@ class TestFbMarketplace:
         assert open(out["label_path"], "rb").read() == b"%PDF-1.4"
         assert oct(os.stat(out["label_path"]).st_mode & 0o777) == "0o600"
         bad = fb.make_own_label("892986822645789")
-        assert bad["label_path"] == "" and "do NOT retry" in bad["save_error"]
+        assert bad["label_path"] == "" and "do NOT buy again" in bad["save_error"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == [os.path.basename(out["label_path"])], \
+            "a failed save leaves no reserved file behind"
+
+    def test_make_own_label_never_retries_the_purchase(self, fb, mock_client, tmp_path, monkeypatch):
+        import xmlrpc.client
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(tmp_path))
+        mock_client._models.execute_kw.side_effect = ConnectionResetError("lost reply")
+        with pytest.raises(Exception):
+            fb.make_own_label("892986822645789")
+        assert len(_calls(mock_client)) == 1, "postage must never be bought twice"
+        assert not list(tmp_path.iterdir())
+        mock_client._models.execute_kw.side_effect = [{"success": True, "tracking": "1Z"}]
+        out = fb.make_own_label("892986822645789")
+        assert "no label PDF" in out["save_error"]
+
+    def test_update_order_rejects_non_text_identifiers(self, fb, mock_client):
+        for kw in ({"tracking": True}, {"tracking": "  "}, {"tracking": "1" * 65},
+                   {"fund_status": "paid", "payout_id": {"a": 1}}):
+            with pytest.raises(OdooError):
+                fb.update_order("1064906909484303", **kw)
+        assert not _calls(mock_client)
 
     def test_import_order_validates_locally(self, fb, mock_client):
         good = {"fb_order_id": "1064906909484303", "unit_price": 12.0, "label_mode": "fb"}

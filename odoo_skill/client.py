@@ -219,6 +219,12 @@ class OdooClient:
                 return None
             raise classify_error(exc, model=model, method=method) from exc
 
+    def execute_once(self, model: str, method: str, *args: Any, **kwargs: Any) -> Any:
+        """:meth:`execute` WITHOUT the connection-error retry, for calls that
+        must never run twice (e.g. buying postage): a lost reply surfaces as
+        an error instead of silently repeating the call."""
+        return type(self).execute.__wrapped__(self, model, method, *args, **kwargs)
+
     # ── Convenience wrappers ─────────────────────────────────────────
 
     def search(
