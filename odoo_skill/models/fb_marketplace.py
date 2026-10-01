@@ -880,14 +880,21 @@ class FbMarketplaceOps(BaseOps):
         return real
 
     def _open_label_dir(self) -> tuple[Path, int]:
-        """Open :meth:`_label_dir` once and do every file operation relative
-        to that descriptor (``dir_fd``): swapping the directory or an
-        ancestor for a link afterwards cannot redirect the open."""
+        """Open :meth:`_label_dir` by walking it component by component from
+        ``/`` with no-follow, descriptor-relative opens, then do every file
+        operation relative to the final descriptor (``dir_fd``): no link in
+        the path, now or swapped in later, can redirect the open."""
         root = self._label_dir()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        dfd = os.open("/", flags)
         try:
-            dfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            for part in root.parts[1:]:
+                nxt = os.open(part, flags, dir_fd=dfd)
+                os.close(dfd)
+                dfd = nxt
         except OSError as exc:
-            raise OdooError(f"cannot open label dir: {exc.strerror}") from None
+            os.close(dfd)
+            raise OdooError(f"cannot open label dir {root}: {exc.strerror}") from None
         return root, dfd
 
     def _read_label(self, pdf_path: str) -> bytes:
@@ -1031,6 +1038,19 @@ class FbMarketplaceOps(BaseOps):
             self._SALE_MODEL, "fb_attach_label", order_no,
             base64.b64encode(blob).decode("ascii"), **kwargs))
 
+    @staticmethod
+    def _discard(fh: Any, name: str, dfd: int) -> None:
+        """Best-effort removal of a reserved label file; never raises (a
+        cleanup error must not hide what happened to the purchase)."""
+        try:
+            fh.close()
+        except OSError:
+            pass
+        try:
+            os.unlink(name, dir_fd=dfd)
+        except OSError:
+            pass
+
     def make_own_label(self, fb_order_id: str) -> dict:
         """Own-label order: buy the label through the configured carrier on
         the open delivery and print it (``fb_make_own_label``). BUYS POSTAGE,
@@ -1052,9 +1072,13 @@ class FbMarketplaceOps(BaseOps):
             fh = os.fdopen(fd, "wb")
             try:
                 raw = self.client.execute_once(self._SALE_MODEL, "fb_make_own_label", order_no)
-            except Exception:
-                fh.close()
-                os.unlink(name, dir_fd=dfd)
+            except Exception as exc:
+                self._discard(fh, name, dfd)
+                if isinstance(exc, OdooConnectionError) or isinstance(exc, OSError):
+                    raise OdooError(
+                        f"label purchase outcome UNKNOWN ({exc}): the postage may "
+                        "have been bought. Check the Odoo delivery's tracking before "
+                        "buying again.") from None
                 raise
             out = self._order_view(raw) if isinstance(raw, dict) else {}
             out["label_path"] = ""
@@ -1073,10 +1097,9 @@ class FbMarketplaceOps(BaseOps):
                 fh.close()
                 out["label_path"] = str(root / name)
             except (ValueError, OSError, binascii.Error) as exc:
-                fh.close()
-                os.unlink(name, dir_fd=dfd)
                 out["save_error"] = (f"label bought but not saved locally ({exc}); "
                                      "do NOT buy again: check / reprint from the Odoo delivery")
+                self._discard(fh, name, dfd)
             return out
         finally:
             os.close(dfd)

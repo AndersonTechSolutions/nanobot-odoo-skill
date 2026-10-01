@@ -307,7 +307,7 @@ class TestFbMarketplace:
         import xmlrpc.client
         monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(tmp_path))
         mock_client._models.execute_kw.side_effect = ConnectionResetError("lost reply")
-        with pytest.raises(Exception):
+        with pytest.raises(OdooError, match="UNKNOWN"):
             fb.make_own_label("892986822645789")
         assert len(_calls(mock_client)) == 1, "postage must never be bought twice"
         assert not list(tmp_path.iterdir())
@@ -1321,3 +1321,19 @@ class TestFieldFiltering:
         fb.search([], fields=["id", "name", "definitely_not_a_field"])
         _, _, _, odoo_kwargs = _calls(mock_client)[0]
         assert "definitely_not_a_field" in odoo_kwargs["fields"]
+
+
+def test_models_transport_never_resends(monkeypatch):
+    """The stdlib transport re-sends once on a reset connection; the client's
+    one-shot transport must not (a resent purchase buys postage twice)."""
+    from odoo_skill import client as client_mod
+    calls = []
+
+    def single(self, host, handler, body, verbose=False):
+        calls.append(1)
+        raise ConnectionResetError("reset")
+
+    monkeypatch.setattr(client_mod._OneShotTransport, "single_request", single)
+    with pytest.raises(ConnectionResetError):
+        client_mod._OneShotTransport().request("h", "/x", b"<x/>")
+    assert calls == [1]
