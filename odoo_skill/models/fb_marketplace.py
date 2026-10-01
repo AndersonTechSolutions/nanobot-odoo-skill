@@ -1072,14 +1072,15 @@ class FbMarketplaceOps(BaseOps):
             fh = os.fdopen(fd, "wb")
             try:
                 raw = self.client.execute_once(self._SALE_MODEL, "fb_make_own_label", order_no)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - any failure: outcome unknown
+                # Whatever broke (server fault after the carrier call, gateway
+                # 504, truncated or unparsable reply), the carrier may already
+                # have sold the label: never present it as a clean failure.
                 self._discard(fh, name, dfd)
-                if isinstance(exc, OdooConnectionError) or isinstance(exc, OSError):
-                    raise OdooError(
-                        f"label purchase outcome UNKNOWN ({exc}): the postage may "
-                        "have been bought. Check the Odoo delivery's tracking before "
-                        "buying again.") from None
-                raise
+                raise OdooError(
+                    f"label purchase outcome UNKNOWN ({type(exc).__name__}: {exc}): "
+                    "the postage may have been bought. Check the Odoo delivery's "
+                    "tracking before buying again.") from None
             out = self._order_view(raw) if isinstance(raw, dict) else {}
             out["label_path"] = ""
             try:

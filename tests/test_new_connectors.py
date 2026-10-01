@@ -311,6 +311,13 @@ class TestFbMarketplace:
             fb.make_own_label("892986822645789")
         assert len(_calls(mock_client)) == 1, "postage must never be bought twice"
         assert not list(tmp_path.iterdir())
+        import http.client
+        for err in (xmlrpc.client.ProtocolError("h", 504, "Gateway Timeout", {}),
+                    http.client.IncompleteRead(b""), xmlrpc.client.ResponseError("bad xml")):
+            mock_client._models.execute_kw.side_effect = err
+            with pytest.raises(OdooError, match="UNKNOWN"):
+                fb.make_own_label("892986822645789")
+        assert not list(tmp_path.iterdir())
         mock_client._models.execute_kw.side_effect = [{"success": True, "tracking": "1Z"}]
         out = fb.make_own_label("892986822645789")
         assert "no label PDF" in out["save_error"]
@@ -1337,3 +1344,13 @@ def test_models_transport_never_resends(monkeypatch):
     with pytest.raises(ConnectionResetError):
         client_mod._OneShotTransport().request("h", "/x", b"<x/>")
     assert calls == [1]
+
+
+@pytest.mark.parametrize("url,kind", [("https://odoo.example", "_OneShotSafeTransport"),
+                                      ("http://odoo.example", "_OneShotTransport")])
+def test_models_proxy_uses_one_shot_transport(url, kind):
+    from odoo_skill import client as client_mod
+    c = client_mod.OdooClient.__new__(client_mod.OdooClient)
+    c._models = None
+    c.config = type("Cfg", (), {"url": url})()
+    assert type(c.models._ServerProxy__transport).__name__ == kind
