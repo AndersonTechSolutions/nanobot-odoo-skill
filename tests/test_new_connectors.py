@@ -255,35 +255,74 @@ class TestFbMarketplace:
         with pytest.raises(OdooError):
             fb.update_order("1064906909484303", fund_status="refunded")
 
-    def test_attach_label_reads_a_pdf_file_only(self, fb, mock_client, tmp_path):
-        pdf = tmp_path / "label.pdf"
+    def test_attach_label_reads_a_pdf_file_only(self, fb, mock_client, tmp_path, monkeypatch):
+        labels = tmp_path / "labels"
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(labels))
+        labels.mkdir()
+        pdf = labels / "label.pdf"
         pdf.write_bytes(b"%PDF-1.4 label")
-        mock_client._models.execute_kw.side_effect = [{"success": True}]
-        fb.attach_label("1064906909484303", str(pdf), tracking="9400")
+        mock_client._models.execute_kw.side_effect = [{"success": True, "big": "x" * 999}]
+        out = fb.attach_label("1064906909484303", str(pdf), tracking="9400")
         _, method, args, kw = _calls(mock_client)[0]
         assert method == "fb_attach_label"
         assert args[1] == "JVBERi0xLjQgbGFiZWw="
         assert kw == {"tracking": "9400"}
-        txt = tmp_path / "secret.txt"
+        assert "big" not in out, "only allowlisted result keys reach the agent"
+        outside = tmp_path / "other.pdf"
+        outside.write_bytes(b"%PDF-1.4 secret")
+        txt = labels / "secret.txt"
         txt.write_text("not a pdf")
-        with pytest.raises(OdooError):
-            fb.attach_label("1064906909484303", str(txt))
-        link = tmp_path / "link.pdf"
-        link.symlink_to(pdf)
-        with pytest.raises(OdooError):
-            fb.attach_label("1064906909484303", str(link))
+        link = labels / "link.pdf"
+        link.symlink_to(outside)
+        big = labels / "big.pdf"
+        big.write_bytes(b"%PDF-" + b"0" * (5 * 1024 * 1024))
+        for bad in (outside, txt, link, big, labels / ".." / "other.pdf"):
+            with pytest.raises(OdooError):
+                fb.attach_label("1064906909484303", str(bad))
+        assert len(_calls(mock_client)) == 1
 
-    def test_make_own_label_saves_pdf_instead_of_returning_it(self, fb, mock_client, tmp_path):
+    def test_label_dir_must_not_be_a_link(self, fb, tmp_path, monkeypatch):
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "linked").symlink_to(real)
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(tmp_path / "linked"))
+        with pytest.raises(OdooError):
+            fb._label_dir()
+
+    def test_make_own_label_saves_pdf_instead_of_returning_it(self, fb, mock_client, tmp_path, monkeypatch):
+        monkeypatch.setenv("FB_LISTER_LABEL_DIR", str(tmp_path))
         mock_client._models.execute_kw.side_effect = [
-            {"success": True, "tracking": "1Z", "pdf_b64": "JVBERi0xLjQ="}]
-        out = fb.make_own_label("892986822645789", save_dir=str(tmp_path))
+            {"success": True, "tracking": "1Z", "pdf_b64": "JVBERi0xLjQ="},
+            {"success": True, "tracking": "1Z", "pdf_b64": "!!notb64"}]
+        out = fb.make_own_label("892986822645789")
         assert "pdf_b64" not in out
         assert open(out["label_path"], "rb").read() == b"%PDF-1.4"
         assert oct(os.stat(out["label_path"]).st_mode & 0o777) == "0o600"
+        bad = fb.make_own_label("892986822645789")
+        assert bad["label_path"] == "" and "do NOT retry" in bad["save_error"]
+
+    def test_import_order_validates_locally(self, fb, mock_client):
+        good = {"fb_order_id": "1064906909484303", "unit_price": 12.0, "label_mode": "fb"}
+        for listing_id in (True, 0, -1, 1.5, "x"):
+            with pytest.raises(OdooError):
+                fb.import_order(listing_id, good)
+        for bad in ({"unit_price": True}, {"unit_price": float("nan")}, {"label_mode": "?"},
+                    {"qty": -1}):
+            with pytest.raises(OdooError):
+                fb.import_order(10, {**good, **bad})
+        with pytest.raises(OdooError):
+            fb.import_order(10, {"fb_order_id": "1064906909484303", "label_mode": "fb"})
+        with pytest.raises(OdooError):
+            fb.update_order("1064906909484303", carrier="USPS")
+        with pytest.raises(OdooError):
+            fb.update_order("1064906909484303", payout_id="1")
+        assert not _calls(mock_client)
 
     def test_orders_status_is_a_read(self, fb, mock_client):
-        mock_client._models.execute_kw.side_effect = [{"success": True, "orders": []}]
-        fb.orders_status(["1064906909484303"])
+        mock_client._models.execute_kw.side_effect = [{"success": True, "orders": [
+            {"fb_order_id": "1064906909484303", "imported": False}]}]
+        out = fb.orders_status(["1064906909484303"])
+        assert out["orders"] == [{"fb_order_id": "1064906909484303", "imported": False}]
         model, method, args, _ = _calls(mock_client)[0]
         assert (model, method, args) == ("fb.marketplace.sale", "fb_orders_status",
                                          [["1064906909484303"]])
