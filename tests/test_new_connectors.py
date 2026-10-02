@@ -322,6 +322,22 @@ class TestFbMarketplace:
         out = fb.make_own_label("892986822645789")
         assert "no label PDF" in out["save_error"]
 
+    def test_update_order_sends_fee_and_payout_amount(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "actions": ["fee"], "fee": 1.2, "payout_amount": 10.8}]
+        out = fb.update_order("1064906909484303", fee=1.2, payout_amount=10.8)
+        _model, method, args, _kw = _calls(mock_client)[0]
+        assert method == "fb_order_sync"
+        assert args[1] == {"fee": 1.2, "payout_amount": 10.8}
+        assert (out["fee"], out["payout_amount"]) == (1.2, 10.8)
+
+    def test_update_order_rejects_bad_fee(self, fb, mock_client):
+        for kw in ({"fee": -1}, {"fee": True}, {"fee": float("nan")},
+                   {"payout_amount": float("inf")}, {"payout_amount": "10"}):
+            with pytest.raises(OdooError):
+                fb.update_order("1064906909484303", **kw)
+        assert not _calls(mock_client)
+
     def test_update_order_rejects_non_text_identifiers(self, fb, mock_client):
         for kw in ({"tracking": True}, {"tracking": "  "}, {"tracking": "1" * 65},
                    {"fund_status": "paid", "payout_id": {"a": 1}}):
