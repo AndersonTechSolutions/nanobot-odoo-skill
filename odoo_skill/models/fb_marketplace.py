@@ -827,7 +827,7 @@ class FbMarketplaceOps(BaseOps):
         "sale_id", "listing_id", "listing_state", "sale_order_id", "sale_order",
         "partner", "amount", "label_mode", "delivery", "delivery_state",
         "tracking", "invoices", "invoice_paid", "street_known", "fund_status",
-        "actions", "attachment_id", "label_attachment_id", "print_queued",
+        "fee", "payout_amount", "actions", "attachment_id", "label_attachment_id", "print_queued",
         "printer", "carrier", "print_error",
     )
 
@@ -990,11 +990,16 @@ class FbMarketplaceOps(BaseOps):
     def update_order(self, fb_order_id: str, ship_to: Optional[dict] = None,
                      tracking: Optional[str] = None, carrier: Optional[str] = None,
                      fund_status: Optional[str] = None,
-                     payout_id: Optional[str] = None) -> dict:
+                     payout_id: Optional[str] = None,
+                     fee: Optional[float] = None,
+                     payout_amount: Optional[float] = None) -> dict:
         """Bring an imported order in step with Facebook (``fb_order_sync``):
         fill a blank street, write tracking + validate the open delivery,
-        register the payment once Facebook shows the payout as Paid. Each
-        step runs once; repeating it changes nothing."""
+        record the payout (status, payout id) and Facebook's fee and net
+        payout amount. Odoo registers no payment: it is recorded in
+        QuickBooks (Receive Payment for the full invoice, Bank Deposit with
+        the fee as a negative line) and syncs back to Odoo. Each step runs
+        once; repeating it changes nothing."""
         self._require()
         if carrier is not None and tracking is None:
             raise OdooError("carrier needs tracking")
@@ -1014,6 +1019,13 @@ class FbMarketplaceOps(BaseOps):
             update["fund_status"] = fund
             if payout_id is not None:
                 update["payout_id"] = self._ident(payout_id, "payout_id", 32)
+        for key, value in (("fee", fee), ("payout_amount", payout_amount)):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or not math.isfinite(value) or value < 0:
+                raise OdooError(f"{key} must be a finite number of 0 or more")
+            update[key] = float(value)
         if not update:
             raise OdooError("nothing to update")
         return self._order_view(self.client.execute(
