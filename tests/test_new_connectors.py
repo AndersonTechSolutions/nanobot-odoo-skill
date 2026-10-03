@@ -372,6 +372,24 @@ class TestFbMarketplace:
                                          [["1064906909484303"]])
         assert fb.orders_status([]) == {"success": True, "orders": []}
 
+    def test_checkout_sales_is_a_scoped_read(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [[
+            {"id": 7, "listing_id": [10, "G430"], "fb_order_id": "1064906909484303",
+             "date": "2026-09-30 12:00:00", "qty": 1.0}]]
+        out = fb.checkout_sales([10], since_days=30)
+        assert out["sales"] == [{"listing_id": 10, "fb_order_id": "1064906909484303",
+                                 "date": "2026-09-30 12:00:00", "qty": 1.0}]
+        model, method, args, kw = _calls(mock_client)[0]
+        assert (model, method) == ("fb.marketplace.sale", "search_read")
+        domain = args[0]
+        assert ["listing_id", "in", [10]] in domain and ["fb_order_id", "!=", False] in domain
+        assert fb.checkout_sales([]) == {"success": True, "sales": []}
+        for bad in ([0], ["x"], [True]):
+            with pytest.raises(Exception):
+                fb.checkout_sales(bad)
+        with pytest.raises(OdooError):
+            fb.checkout_sales([10], since_days=0)
+
     def test_mark_sold_closed_reports_temp_product_archived(self, fb, mock_client):
         """A closed sale on a temp item archives its product server-side; the
         reply must say so (read by id so the archived row still comes back)."""
