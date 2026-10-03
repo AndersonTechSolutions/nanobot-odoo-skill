@@ -336,6 +336,7 @@
   "fb_marketplace.available",
   "fb_marketplace.boxes",
   "fb_marketplace.channel_gaps",
+  "fb_marketplace.checkout_sales",
   "fb_marketplace.count",
   "fb_marketplace.count_computed",
   "fb_marketplace.draft_listings",

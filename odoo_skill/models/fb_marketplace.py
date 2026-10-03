@@ -85,6 +85,9 @@ _DETAIL_FIELDS = _LIST_FIELDS + [
     # fb_marketplace_lister 4.x per-sale history; dropped by _existing()
     # on databases still running an older module.
     "sold_price", "sold_qty", "sale_count", "can_record_sale",
+    # units on hand (computed): the quantity a multi-unit post offers on
+    # Facebook, so one checkout does not mark the whole post Sold.
+    "qty_available",
     # fb_marketplace_lister 4.12 description template: ``description`` is the
     # body only; ``description_full`` (body + pickup / shipping / payment /
     # credit-card footer) is what goes on Facebook. Dropped by _existing()
@@ -952,6 +955,32 @@ class FbMarketplaceOps(BaseOps):
         if not isinstance(rows, list):
             raise OdooError("unexpected server reply")
         return {"success": True, "orders": [self._order_view(r) for r in rows]}
+
+    def checkout_sales(self, listing_ids: list, since_days: int = 60) -> dict:
+        """Read-only: Facebook checkout orders imported onto these listings in
+        the last ``since_days`` days, newest first. Lets the reconcile tell a
+        post Facebook marked Sold after a checkout (the sale is already in
+        Odoo; relist it) from one Ian marked Sold by hand (record the sale)."""
+        self._require()
+        ids = [self._positive_id(i, "listing_id") for i in (listing_ids or [])]
+        if len(ids) > 500:
+            raise OdooError("at most 500 listing ids per call")
+        since_days = int(since_days)
+        if not 1 <= since_days <= 365:
+            raise OdooError("since_days must be 1..365")
+        if not ids:
+            return {"success": True, "sales": []}
+        rows = self.client.search_read(
+            self._SALE_MODEL,
+            [["listing_id", "in", ids], ["fb_order_id", "!=", False],
+             ["date", ">=", utc_stamp(-timedelta(days=since_days))]],
+            fields=["listing_id", "fb_order_id", "date", "qty"],
+            limit=1000, order="date desc")
+        return {"success": True, "sales": [
+            {"listing_id": r["listing_id"][0] if r.get("listing_id") else None,
+             "fb_order_id": r.get("fb_order_id") or None,
+             "date": r.get("date") or None, "qty": r.get("qty")}
+            for r in rows]}
 
     def import_order(self, listing_id: int, order: dict) -> dict:
         """Import one Facebook checkout order onto a listing
