@@ -832,6 +832,8 @@ class FbMarketplaceOps(BaseOps):
         "tracking", "invoices", "invoice_paid", "street_known", "fund_status",
         "fee", "payout_amount", "actions", "attachment_id", "label_attachment_id", "print_queued",
         "printer", "carrier", "print_error",
+        "qbo_payment_id", "qbo_deposit_id", "payout_recorded", "already_recorded",
+        "deposit_total", "error",
     )
 
     @staticmethod
@@ -1059,6 +1061,26 @@ class FbMarketplaceOps(BaseOps):
             raise OdooError("nothing to update")
         return self._order_view(self.client.execute(
             self._SALE_MODEL, "fb_order_sync", self._order_no(fb_order_id), update))
+
+    def record_payout(self, fb_order_id: str) -> dict:
+        """Book a paid-out Facebook order in QuickBooks (``fb_record_payout``):
+        Receive Payment for the full invoice, then a bank deposit with the
+        Facebook fee as a negative line, so the deposit equals the payout.
+        Needs ``update_order`` to have recorded fund_status 'paid', the fee and
+        the payout amount. Recording twice changes nothing; a failed deposit
+        comes back ``success: False`` and a retry does not pay twice. Writes to
+        the books: Kevin runs it only on Ian's yes."""
+        self._require()
+        order_no = self._order_no(fb_order_id)
+        try:
+            raw = self.client.execute_once(self._SALE_MODEL, "fb_record_payout", order_no)
+        except OdooError:
+            raise   # Odoo refused it: nothing was booked
+        except Exception as exc:  # noqa: BLE001 - lost reply: outcome unknown
+            raise OdooError(
+                f"record_payout {order_no}: outcome UNKNOWN ({type(exc).__name__}); "
+                "check the order (orders_status payout_recorded) before retrying") from None
+        return self._order_view(raw)
 
     def attach_label(self, fb_order_id: str, pdf_path: str,
                      tracking: Optional[str] = None,

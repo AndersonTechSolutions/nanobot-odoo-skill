@@ -322,6 +322,23 @@ class TestFbMarketplace:
         out = fb.make_own_label("892986822645789")
         assert "no label PDF" in out["save_error"]
 
+    def test_record_payout_calls_once_and_never_retries(self, fb, mock_client):
+        mock_client._models.execute_kw.side_effect = [
+            {"success": True, "actions": ["qbo_payment", "qbo_deposit"],
+             "payout_recorded": True, "qbo_payment_id": "501", "qbo_deposit_id": "601",
+             "deposit_total": 9.75}]
+        out = fb.record_payout("1064906909484303")
+        model, method, args, _kw = _calls(mock_client)[0]
+        assert (model, method, args) == ("fb.marketplace.sale", "fb_record_payout",
+                                         ["1064906909484303"])
+        assert out["payout_recorded"] and out["deposit_total"] == 9.75
+        mock_client._models.execute_kw.side_effect = ConnectionResetError("lost reply")
+        with pytest.raises(OdooError, match="UNKNOWN"):
+            fb.record_payout("1064906909484303")
+        assert len(_calls(mock_client)) == 2, "booking the books is never retried"
+        with pytest.raises(OdooError):
+            fb.record_payout("12ab")
+
     def test_update_order_sends_fee_and_payout_amount(self, fb, mock_client):
         mock_client._models.execute_kw.side_effect = [
             {"success": True, "actions": ["fee"], "fee": 1.2, "payout_amount": 10.8}]

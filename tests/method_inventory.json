@@ -98,6 +98,7 @@
   "fb_marketplace.set_price",
   "fb_marketplace.update",
   "fb_marketplace.update_order",
+  "fb_marketplace.record_payout",
   "field_service.create",
   "field_service.reschedule",
   "field_service.run_action",
